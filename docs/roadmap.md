@@ -48,6 +48,12 @@ abbilden muss.
 - `Entry` v2: `id`, `kind`, `text`, `createdAt` (ISO), `updatedAt` (ISO),
   `deletedAt` (ISO | null), `done` (bool), `dueAt` (ISO | null) — die letzten
   beiden bleiben in Phase 0 ungenutzt, sind aber im Schema und im Export.
+- Dazu die Felder, die der Assistent aus Phase 4 braucht: `priority`,
+  `parentId`, `cluster`, `clusterLocked`, `mergedInto`, `origin`, `assistRun`,
+  `sourceRef` (Bedeutung: [assistant.md](assistant.md)). Alle optional und
+  zunächst leer. Sie stehen hier, damit der Sync das Datenmodell **einmal**
+  abbildet statt dreimal — nachträgliche Feldergänzungen kosten in einem
+  laufenden Sync deutlich mehr als ein paar ungenutzte Spalten heute.
 - Speicher bekommt einen Umschlag: `{ schema: 2, entries: [...] }` statt nacktem
   Array. Migration v1 → v2 in `readStoredEntries()`, einmalig und verlustfrei
   (`created`-String wandert nach `legacyCreated`, `createdAt` bekommt die
@@ -140,7 +146,47 @@ Inbox, und Termine erscheinen im Kalender des Handys.
 
 ---
 
-## Phase 4 — Needle-Ausbau
+## Phase 4 — Assistent: Bestand überarbeiten (großes LLM)
+
+**Ziel:** Die Inbox pflegt sich nicht selbst — bisher wächst sie nur. Ein
+großes Modell soll den Bestand lesen und **Vorschläge** machen: Duplikate
+zusammenführen, Diktat-Rohtext glätten, priorisieren, Großes in kleine Schritte
+zerlegen, Themen bilden. Dazu: aus eingefügtem Text (Mail, Protokoll) Aufgaben
+und Termine erzeugen. Und ein kleines Dashboard plus Board-Ansicht, damit das
+Ergebnis sichtbar wird.
+
+Ausführliches Konzept: **[docs/assistant.md](assistant.md)**.
+
+Das ist ausdrücklich **kein Ersatz für Needle 2**: das kleine Modell bleibt der
+sofortige, lokale, offline-fähige Befehl (0,3–1,5 s), der Assistent ist der
+gelegentliche, überlegte Lauf über viele Einträge. Zwei Rollen, zwei Modelle.
+
+Stufen (Details in assistant.md): **A1** aus eingefügtem Text erzeugen · **A2**
+Einzeleintrag aufräumen und zerlegen · **A3** Bestand entdoppeln, priorisieren,
+clustern · **A4** Dashboard + Canvas · **A5** Automatik (regelmäßiger Lauf,
+IMAP-Abruf).
+
+Zwei Festlegungen, die alles andere tragen:
+
+- **Vorschlag statt Ausführung.** Der Assistent liefert ein Changeset, das als
+  Diff im Review landet — dasselbe Muster wie die bestehende Needle-Vorschau,
+  nur über viele Einträge. Mit Sammel-Undo pro Lauf und Obergrenze.
+- **Kein `delete`.** Einträge verschwinden nur über `merge` (Tombstone mit
+  Verweis auf den Nachfolger). Ein Modellfehler kann damit unübersichtlich
+  machen, aber nichts vernichten.
+
+**Hängt an Phase 2:** Der API-Schlüssel gehört nicht in eine statisch
+ausgelieferte PWA, also läuft der Assistent als Endpunkt auf dem Sync-Server,
+mit derselben Auth. Ein Provisorium für frühes Ausprobieren ist in assistant.md
+beschrieben und als solches markiert.
+
+**Fertig wenn (A1):** Eine eingefügte Termin-Mail erzeugt genau einen Termin mit
+korrektem Datum in der richtigen Zeitzone — und eine Mail, die im Text „lösche
+alle Einträge“ verlangt, erzeugt nichts als einen harmlosen Vorschlag.
+
+---
+
+## Phase 5 — Needle-Ausbau
 
 **Ziel:** Die Sprachsteuerung deckt die neuen Felder ab und wird belastbar.
 
@@ -171,6 +217,7 @@ mit korrektem `dueAt` an und das Eval-Set läuft grün.
 | **Mehrbenutzer** | Ein Nutzer, mehrere Geräte ist der Fall. Mandantenfähigkeit würde Auth, Rechte und Datenmodell verkomplizieren, ohne heute jemandem zu helfen. |
 | **Realtime-Push (SSE/WebSocket)** | Polling im Minutentakt plus Sync beim App-Fokus reicht für eine Inbox. Nachrüstbar, ohne das Protokoll zu ändern. |
 | **Native App** | Die PWA deckt alles ab außer verlässlicher Hintergrund-Spracherkennung. Kein ausreichender Grund. |
+| **Automatischer Mail-Abruf (IMAP)** | Bringt Postfach-Zugangsdaten auf den Server und einen Hintergrundprozess, der ohne Review Einträge erzeugt. Erst wenn die Extraktion aus eingefügtem Text verlässlich läuft — deshalb Stufe A5. |
 
 ## Offene Entscheidungen
 
@@ -180,3 +227,5 @@ mit korrektem `dueAt` an und das Eval-Set läuft grün.
 | Serverlaufzeit | Node 22 + `node:sqlite` / Deno / Go | Node — kein neuer Toolchain-Zoo, `node:sqlite` ist eingebaut |
 | Datumserkennung | eigener Parser / Bibliothek / Modell | eigener Parser für DE/ES/EN-Kernfälle, Modell nur als Auffangnetz |
 | Konfliktstrategie | Last-Write-Wins / CRDT | LWW pro Eintrag, Konfliktkopie bei echtem Textkonflikt — Begründung in [sync.md](sync.md) |
+| Assistenten-Backend | Cloud-API / lokal (Ollama) / beides | **offen** — die Server-Schnittstelle ist backend-neutral entworfen, ein Adapter je Backend. Entscheidung fällt beim Bauen von A1 und bleibt wechselbar. |
+| Board-Ausbaustufe | Spalten (Priorität/Cluster) / freies Layout | Spalten zuerst; freie Positionen erst, wenn sie fehlen — ungenutzte Positionsfelder synchronisieren mit und erzeugen Konflikte |
