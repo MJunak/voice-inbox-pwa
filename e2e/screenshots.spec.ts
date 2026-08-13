@@ -52,6 +52,18 @@ test("screenshot: Debug-Panel nach Befehl", async ({ page }) => {
   await page.screenshot({ path: "e2e/screens/05-debug.png", fullPage: true });
 });
 
+test("screenshot: Aktions-Vorschau (Modellpfad)", async ({ page }) => {
+  await installNeedleMock(page, [
+    { match: "zahnarzt", response: '{"type":"call","function_calls":[{"name":"delete_note","arguments":{"match":"Zahnarzt"}}],"confidence":0.87}' },
+  ]);
+  await seedEntries(page, sampleEntries);
+  await page.goto("/");
+  await page.getByRole("textbox", { name: /Befehl an die App/i }).fill("räum den zahnarzt eintrag weg");
+  await page.getByRole("button", { name: "Ausführen" }).click();
+  await page.getByRole("dialog", { name: /Vorschau der Aktion/i }).waitFor();
+  await page.screenshot({ path: "e2e/screens/06-preview.png", fullPage: true });
+});
+
 test("screenshot: Composer mit Text", async ({ page }) => {
   await page.addInitScript(() => localStorage.clear());
   await page.goto("/");

@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { TOOLS_JSON, runToolCalls, tryFastPath, executeToolCall, parseModelInfo, type ActionApi } from "./agent/actions";
+import { TOOLS_JSON, tryFastPath, executeToolCall, parseToolCalls, parseModelInfo, describeToolCall, type ActionApi, type ToolCall } from "./agent/actions";
 import { resolveEngine, preloadEngine } from "./agent/engine";
 
 type ModelState = "idle" | "loading" | "ready" | "error";
@@ -56,6 +56,7 @@ export default function Home() {
   const [speechLang, setSpeechLang] = useState<SpeechLang>("de-DE");
   const speechLangRef = useRef<SpeechLang>("de-DE");
   const [debug, setDebug] = useState<{ query: string; raw: string; message: string; ms: number; path: string; confidence?: number; reasoning?: string } | null>(null);
+  const [pending, setPending] = useState<{ calls: ToolCall[]; confidence?: number } | null>(null);
   const recognitionRef = useRef<Recognition | null>(null);
   const draftRef = useRef("");
   const wantsToListenRef = useRef(false);
@@ -241,11 +242,16 @@ export default function Home() {
     try {
       const engine = resolveEngine((loadedBytes, total) => setModelProgress(total ? loadedBytes / total : 0));
       const raw = await engine.run(text, TOOLS_JSON);
-      const result = runToolCalls(raw, actionApi);
+      const calls = parseToolCalls(raw);
       const info = parseModelInfo(raw);
-      setDebug((d) => d && { ...d, raw, message: result.message, ms: performance.now() - start, ...info });
-      flash(result.message);
-      if (result.ok) setCommand("");
+      if (calls.length === 0) {
+        setDebug((d) => d && { ...d, raw, message: "Kein passender Befehl erkannt", ms: performance.now() - start, ...info });
+        flash("Kein passender Befehl erkannt");
+      } else {
+        // Nicht sofort ausführen: Vorschau anzeigen, Nutzer bestätigt.
+        setPending({ calls, confidence: info.confidence });
+        setDebug((d) => d && { ...d, raw, message: "wartet auf Bestätigung …", ms: performance.now() - start, ...info });
+      }
     } catch (error) {
       const message = `Fehler: ${(error as Error).message}`;
       setDebug((d) => d && { ...d, message, ms: performance.now() - start });
@@ -253,6 +259,21 @@ export default function Home() {
     } finally {
       setAgentBusy(false); setAgentStatus("");
     }
+  }
+
+  function confirmPending() {
+    if (!pending) return;
+    const results = pending.calls.map((call) => executeToolCall(call, actionApi));
+    const message = results.map((r) => r.message).join(" · ");
+    setDebug((d) => d && { ...d, message });
+    flash(message);
+    if (results.every((r) => r.ok)) setCommand("");
+    setPending(null);
+  }
+  function discardPending() {
+    setPending(null);
+    setDebug((d) => d && { ...d, message: "verworfen" });
+    flash("Aktion verworfen");
   }
 
   const modelLabel =
@@ -286,6 +307,17 @@ export default function Home() {
         <span className={`cmdModel ${modelState}`} title="Lokales Needle-Modell (WASM, im Browser)" role="status">{agentBusy && agentStatus ? agentStatus : modelLabel}</span>
         <button type="submit" disabled={agentBusy || !command.trim()}>{agentBusy ? <span className="spinner" aria-label="arbeitet" /> : "Ausführen"}</button>
       </form>
+      {pending && <div className="preview" role="dialog" aria-label="Vorschau der Aktion">
+        <div className="previewHead">
+          <strong>Needle möchte:</strong>
+          {typeof pending.confidence === "number" && <span className={`previewConf ${pending.confidence < 0.3 ? "low" : ""}`}>{(pending.confidence * 100).toFixed(0)} % sicher</span>}
+        </div>
+        <ul>{pending.calls.map((call, index) => <li key={index}>{describeToolCall(call)}</li>)}</ul>
+        <div className="previewActions">
+          <button className="confirm" onClick={confirmPending}>Bestätigen</button>
+          <button className="discard" onClick={discardPending}>Verwerfen</button>
+        </div>
+      </div>}
       <details className="debugPanel">
         <summary>Debug: Inferenz</summary>
         {debug ? <dl>

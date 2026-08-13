@@ -199,6 +199,38 @@ export function parseToolCalls(raw: string): ToolCall[] {
   return calls;
 }
 
+// Menschenlesbare Beschreibung eines Tool-Calls – für die Vorschau, BEVOR
+// eine Modell-Aktion ausgeführt wird.
+export function describeToolCall(call: ToolCall): string {
+  const { name, arguments: args } = call;
+  switch (name) {
+    case "switch_view":
+      return `Ansicht wechseln: ${resolveView(args.view) === "list" ? "Liste" : "Karten"}`;
+    case "filter_kind":
+      return `Filter setzen: ${resolveFilter(args.kind)}`;
+    case "search":
+      return `Suchen nach „${asString(args.query)}“`;
+    case "clear_search":
+      return "Suche zurücksetzen";
+    case "add_note":
+      return `Neuen Eintrag anlegen: „${asString(args.text)}“`;
+    case "delete_note": {
+      const match = asString(args.match).trim();
+      if (POSITIONAL.test(match)) {
+        const kind = resolveKind(match.replace(POSITIONAL, ""));
+        return `Neuesten Eintrag löschen${kind ? ` (${kind})` : ""}`;
+      }
+      return `Einträge löschen, die „${match}“ enthalten`;
+    }
+    case "set_kind":
+      return `Kategorie auf ${resolveKind(args.kind) ?? "?"} setzen für Einträge mit „${asString(args.match)}“`;
+    case "export_data":
+      return "Alle Einträge als JSON exportieren";
+    default:
+      return `Unbekannte Aktion: ${name}`;
+  }
+}
+
 // Führt genau einen Tool-Call gegen die API aus und liefert eine Meldung.
 export function executeToolCall(call: ToolCall, api: ActionApi): ExecResult {
   const { name, arguments: args } = call;

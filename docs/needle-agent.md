@@ -23,6 +23,13 @@ passend zum Rest der App.
 **Fast-Path**: eindeutige Formulierungen werden per Regex direkt ausgeführt,
 ganz ohne Modell (0 ms). Alles andere geht durch Needle 2.
 
+**Aktions-Vorschau**: Modellpfad-Aktionen werden nie sofort ausgeführt. Unter
+der Command-Bar erscheint „Needle möchte: …“ mit einer menschenlesbaren
+Beschreibung jeder Aktion (`describeToolCall`) und der Modell-Confidence —
+erst **Bestätigen** führt aus, **Verwerfen** bricht ab. Fast-Path-Befehle
+laufen weiterhin sofort, weil sie ein deterministisches Mapping der wörtlichen
+Eingabe sind.
+
 ## Voice Input & Sprachen
 
 - **Mikro-Button (●) in der Command-Bar**: klicken, Befehl sprechen — der

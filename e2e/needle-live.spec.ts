@@ -53,9 +53,13 @@ test("echte Needle-2-Engine führt Befehle aus (Fast-Path + Modell)", async ({ p
   await expect(page.locator(".row")).toHaveCount(3);
 
   // 2) Echte Inferenz: Notiz anlegen (im Browser verifizierter Modell-Fall).
+  //    Modellpfad zeigt erst eine Vorschau, die bestätigt werden muss.
   await input.fill("leg eine Notiz an: Milch kaufen");
   await submit.click();
-  await expect(page.locator(".row")).toHaveCount(4, { timeout: 30_000 });
+  const preview = page.getByRole("dialog", { name: /Vorschau der Aktion/i });
+  await expect(preview).toContainText("Neuen Eintrag anlegen", { timeout: 30_000 });
+  await page.getByRole("button", { name: "Bestätigen" }).click();
+  await expect(page.locator(".row")).toHaveCount(4);
   await expect(page.locator(".row", { hasText: "Milch kaufen" })).toHaveCount(1);
 
   // 3) Fast-Path positional: neueste Notiz (= gerade angelegte) löschen.

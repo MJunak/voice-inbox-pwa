@@ -40,6 +40,12 @@ async function command(page: import("@playwright/test").Page, text: string) {
   await page.getByRole("button", { name: "Ausführen" }).click();
 }
 
+// Modellpfad: Aktionen werden erst nach Bestätigung der Vorschau ausgeführt.
+async function commandModel(page: import("@playwright/test").Page, text: string) {
+  await command(page, text);
+  await page.getByRole("button", { name: "Bestätigen" }).click();
+}
+
 test("Befehl wechselt in die Listenansicht", async ({ page }) => {
   await seedEntries(page, seed);
   await page.goto("/");
@@ -53,7 +59,7 @@ test("Befehl löscht einen Eintrag per Texttreffer", async ({ page }) => {
   await seedEntries(page, seed);
   await page.goto("/");
   await expect(page.locator(".card")).toHaveCount(3);
-  await command(page, "zahnarzt löschen");
+  await commandModel(page, "zahnarzt löschen");
   await expect(page.locator(".card")).toHaveCount(2);
   await expect(page.getByText("Termin beim Zahnarzt")).toHaveCount(0);
 });
@@ -79,7 +85,7 @@ test("Befehl durchsucht die Inbox (Modellpfad)", async ({ page }) => {
   await seedEntries(page, seed);
   await page.goto("/");
   // Formulierung, die der Fast-Path nicht abdeckt -> geht durch die (Mock-)Engine.
-  await command(page, "wo war das mit Anna");
+  await commandModel(page, "wo war das mit Anna");
   await expect(page.getByRole("textbox", { name: /Inbox durchsuchen/i })).toHaveValue("Anna");
   await expect(page.locator(".card")).toHaveCount(1);
 });
@@ -87,7 +93,7 @@ test("Befehl durchsucht die Inbox (Modellpfad)", async ({ page }) => {
 test("Befehl ändert die Kategorie eines Eintrags", async ({ page }) => {
   await seedEntries(page, seed);
   await page.goto("/");
-  await command(page, "mach das zur aufgabe machen");
+  await commandModel(page, "mach das zur aufgabe machen");
   const anna = page.locator(".card", { hasText: "Buchtipp von Anna" });
   await expect(anna.locator(".tag")).toHaveText("Aufgabe");
 });
@@ -95,7 +101,7 @@ test("Befehl ändert die Kategorie eines Eintrags", async ({ page }) => {
 test("Befehl legt einen neuen Eintrag an", async ({ page }) => {
   await page.addInitScript(() => localStorage.clear());
   await page.goto("/");
-  await command(page, "bitte notiz anlegen");
+  await commandModel(page, "bitte notiz anlegen");
   await expect(page.locator(".card")).toHaveCount(1);
   await expect(page.locator(".card").first()).toContainText("Frisch angelegt per Befehl");
 });
@@ -104,14 +110,14 @@ test("verarbeitet unsaubere Enum-Ausgaben des Modells (fuzzy)", async ({ page })
   await seedEntries(page, seed);
   await page.goto("/");
   // "Liste" statt "list"
-  await command(page, "fuzzy liste");
+  await commandModel(page, "fuzzy liste");
   await expect(page.locator(".row")).toHaveCount(3);
   // "list view" statt "list"
-  await command(page, "fuzzy karten dummy"); // erst zurück auf Karten
-  await command(page, "fuzzy english");
+  await commandModel(page, "fuzzy karten dummy"); // erst zurück auf Karten
+  await commandModel(page, "fuzzy english");
   await expect(page.locator(".row")).toHaveCount(3);
   // "tasks" statt "Aufgabe"
-  await command(page, "fuzzy task");
+  await commandModel(page, "fuzzy task");
   await expect(page.locator(".row")).toHaveCount(1);
   await expect(page.locator(".row").first()).toContainText("Rechnung");
 });
@@ -128,7 +134,7 @@ test("Befehl löscht die letzte Notiz (positionale Referenz)", async ({ page }) 
 test("übersteht doppelte Argument-Keys (Parameter-Echo)", async ({ page }) => {
   await seedEntries(page, seed);
   await page.goto("/");
-  await command(page, "dupkey filter");
+  await commandModel(page, "dupkey filter");
   // Trotz {"kind":"Termin","kind":"kind"} muss der erste Wert gewinnen.
   await expect(page.locator(".card")).toHaveCount(1);
   await expect(page.locator(".card").first()).toContainText("Zahnarzt");
@@ -159,7 +165,7 @@ test("Debug-Panel zeigt Modellpfad mit Envelope-Infos", async ({ page }) => {
 test("verarbeitet das Needle-2-Envelope-Format", async ({ page }) => {
   await seedEntries(page, [...seed, { id: "d", kind: "Idee", text: "App-Idee festhalten", created: "Gestern" }]);
   await page.goto("/");
-  await command(page, "envelope bitte");
+  await commandModel(page, "envelope bitte");
   await expect(page.locator(".card")).toHaveCount(1);
   await expect(page.locator(".card").first()).toContainText("App-Idee");
   // Metadaten aus dem Envelope landen im Debug-Panel.
@@ -212,6 +218,33 @@ test("Sprach-Dropdown stellt die Erkennungssprache um und bleibt gespeichert", a
   // Persistenz über Reload
   await page.reload();
   await expect(page.getByRole("combobox", { name: /Sprache der Spracherkennung/i })).toHaveValue("es-ES");
+});
+
+test("Vorschau beschreibt die Modell-Aktion und kann verworfen werden", async ({ page }) => {
+  await seedEntries(page, seed);
+  await page.goto("/");
+  await command(page, "zahnarzt löschen");
+  // Vorschau zeigt menschenlesbar, was passieren würde – noch nichts gelöscht.
+  const preview = page.getByRole("dialog", { name: /Vorschau der Aktion/i });
+  await expect(preview).toBeVisible();
+  await expect(preview).toContainText("Einträge löschen, die „Zahnarzt“ enthalten");
+  await expect(page.locator(".card")).toHaveCount(3);
+  // Verwerfen -> nichts passiert, Vorschau verschwindet.
+  await page.getByRole("button", { name: "Verwerfen" }).click();
+  await expect(preview).toHaveCount(0);
+  await expect(page.locator(".card")).toHaveCount(3);
+  await expect(page.locator(".notice")).toContainText("Aktion verworfen");
+});
+
+test("Vorschau zeigt die Envelope-Confidence an", async ({ page }) => {
+  await seedEntries(page, seed);
+  await page.goto("/");
+  await command(page, "envelope bitte");
+  const preview = page.getByRole("dialog", { name: /Vorschau der Aktion/i });
+  await expect(preview).toContainText("Filter setzen: Idee");
+  await expect(preview).toContainText("91 % sicher");
+  await page.getByRole("button", { name: "Bestätigen" }).click();
+  await expect(preview).toHaveCount(0);
 });
 
 test("unbekannter Befehl meldet, dass nichts erkannt wurde", async ({ page }) => {
