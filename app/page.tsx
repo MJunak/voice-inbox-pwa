@@ -1,104 +1,99 @@
 "use client";
-
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Kind = "Aufgabe" | "Termin" | "Notiz" | "Idee";
-type Entry = { id: string; kind: Kind; title: string; detail: string; created: string };
-
-const seed: Entry[] = [
-  { id: "1", kind: "Aufgabe", title: "Testplan fertigstellen", detail: "Vor dem Termin mit Daniel abschließen", created: "Heute, 10:24" },
-  { id: "2", kind: "Termin", title: "Migration mit Daniel", detail: "Morgen · 15:00 Uhr", created: "Heute, 10:22" },
-  { id: "3", kind: "Idee", title: "Automatische Smoke Tests", detail: "End-to-End-Prozesse als wiederholbare Tests erfassen", created: "Gestern" },
-];
+type Entry = { id: string; kind: Kind; text: string; created: string };
+type SpeechResult = { isFinal: boolean; 0: { transcript: string } };
+type Recognition = { lang: string; continuous: boolean; interimResults: boolean; onresult: ((event: { results: ArrayLike<SpeechResult> }) => void) | null; onend: (() => void) | null; start: () => void; stop: () => void };
+type RecognitionConstructor = new () => Recognition;
 
 const colors: Record<Kind, string> = { Aufgabe: "blue", Termin: "orange", Notiz: "violet", Idee: "green" };
-
 function classify(text: string): Kind {
-  const t = text.toLowerCase();
-  if (/morgen|uhr|termin|treffen|montag|dienstag|mittwoch|donnerstag|freitag/.test(t)) return "Termin";
-  if (/muss|erledigen|machen|aufgabe|todo|erinner/.test(t)) return "Aufgabe";
-  if (/idee|vielleicht|könnte|vorschlag/.test(t)) return "Idee";
+  const value = text.toLowerCase();
+  if (/morgen|uhr|termin|treffen|montag|dienstag|mittwoch|donnerstag|freitag/.test(value)) return "Termin";
+  if (/muss|erledigen|machen|aufgabe|todo|erinner/.test(value)) return "Aufgabe";
+  if (/idee|vielleicht|könnte|vorschlag/.test(value)) return "Idee";
   return "Notiz";
+}
+function readStoredEntries(): Entry[] {
+  try {
+    const stored = localStorage.getItem("voice-inbox-entries");
+    if (!stored) return [];
+    const parsed = JSON.parse(stored) as Array<Entry & { title?: string; detail?: string }>;
+    return parsed.map(({ id, kind, text, title, detail, created }) => ({ id, kind, text: text ?? [title, detail && !detail.startsWith("Automatisch lokal erkannt") ? detail : ""].filter(Boolean).join("\n"), created }));
+  } catch { return []; }
 }
 
 export default function Home() {
-  const [entries, setEntries] = useState<Entry[]>(seed);
+  const [entries, setEntries] = useState<Entry[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [draft, setDraft] = useState("");
   const [listening, setListening] = useState(false);
   const [filter, setFilter] = useState<"Alle" | Kind>("Alle");
   const [query, setQuery] = useState("");
+  const recognitionRef = useRef<Recognition | null>(null);
+  const draftRef = useRef("");
+  const wantsToListenRef = useRef(false);
+  const sessionStartRef = useRef("");
 
   useEffect(() => {
-    const stored = localStorage.getItem("voice-inbox-entries");
-    if (stored) setEntries(JSON.parse(stored));
-    if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`);
-    }
+    const loadTimer = window.setTimeout(() => { setEntries(readStoredEntries()); setLoaded(true); }, 0);
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`);
+    return () => { window.clearTimeout(loadTimer); wantsToListenRef.current = false; recognitionRef.current?.stop(); };
   }, []);
+  useEffect(() => { if (loaded) localStorage.setItem("voice-inbox-entries", JSON.stringify(entries)); }, [entries, loaded]);
 
-  useEffect(() => { localStorage.setItem("voice-inbox-entries", JSON.stringify(entries)); }, [entries]);
+  const visible = useMemo(() => entries.filter((entry) => (filter === "Alle" || entry.kind === filter) && entry.text.toLowerCase().includes(query.toLowerCase())), [entries, filter, query]);
 
-  const visible = useMemo(() => entries.filter(e =>
-    (filter === "Alle" || e.kind === filter) && `${e.title} ${e.detail}`.toLowerCase().includes(query.toLowerCase())
-  ), [entries, filter, query]);
+  function beginRecognition(RecognitionApi: RecognitionConstructor, baseText: string) {
+    const recognition = new RecognitionApi();
+    recognition.lang = "de-DE"; recognition.continuous = true; recognition.interimResults = true;
+    sessionStartRef.current = baseText.trimEnd();
+    recognition.onresult = (event) => {
+      let finalText = ""; let interimText = "";
+      for (let index = 0; index < event.results.length; index += 1) {
+        const transcript = event.results[index][0].transcript;
+        if (event.results[index].isFinal) finalText += transcript; else interimText += transcript;
+      }
+      const nextDraft = `${sessionStartRef.current}${sessionStartRef.current ? " " : ""}${finalText}${interimText}`;
+      draftRef.current = nextDraft; setDraft(nextDraft);
+    };
+    recognition.onend = () => {
+      recognitionRef.current = null;
+      if (wantsToListenRef.current) window.setTimeout(() => beginRecognition(RecognitionApi, draftRef.current), 120);
+      else setListening(false);
+    };
+    recognitionRef.current = recognition; recognition.start(); setListening(true);
+  }
 
   function toggleListening() {
-    if (listening) return setListening(false);
-    const SpeechRecognition = (window as unknown as { webkitSpeechRecognition?: new () => any; SpeechRecognition?: new () => any }).SpeechRecognition
-      || (window as unknown as { webkitSpeechRecognition?: new () => any }).webkitSpeechRecognition;
-    if (!SpeechRecognition) { alert("Spracherkennung wird in diesem Browser nicht unterstützt. Nutze Chrome oder Edge."); return; }
-    const recognition = new SpeechRecognition();
-    recognition.lang = "de-DE"; recognition.continuous = true; recognition.interimResults = true;
-    recognition.onresult = (event: any) => {
-      let text = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) text += event.results[i][0].transcript;
-      setDraft(text.trim());
-    };
-    recognition.onend = () => setListening(false);
-    recognition.start(); setListening(true);
+    if (wantsToListenRef.current) { wantsToListenRef.current = false; recognitionRef.current?.stop(); return; }
+    const speechWindow = window as typeof window & { SpeechRecognition?: RecognitionConstructor; webkitSpeechRecognition?: RecognitionConstructor };
+    const RecognitionApi = speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
+    if (!RecognitionApi) { alert("Spracherkennung wird in diesem Browser nicht unterstützt. Nutze Chrome oder Edge."); return; }
+    wantsToListenRef.current = true; beginRecognition(RecognitionApi, draft);
   }
-
   function addEntry() {
     const text = draft.trim(); if (!text) return;
-    const kind = classify(text);
-    setEntries([{ id: crypto.randomUUID(), kind, title: text.length > 58 ? `${text.slice(0, 58)}…` : text, detail: "Automatisch lokal erkannt · bitte prüfen", created: "Gerade eben" }, ...entries]);
-    setDraft(""); setListening(false);
+    wantsToListenRef.current = false; recognitionRef.current?.stop();
+    setEntries((current) => [{ id: crypto.randomUUID(), kind: classify(text), text, created: "Gerade eben" }, ...current]); draftRef.current = ""; setDraft("");
   }
 
-  return (
-    <main>
-      <header className="topbar">
-        <a className="brand" href="#"><span className="logo">V</span><span>Voice Inbox</span></a>
-        <nav><button className="navActive">Inbox <b>{entries.length}</b></button><button>Sammlung</button><button>Einstellungen</button></nav>
-        <div className="local"><span /> Lokal & privat</div>
-      </header>
-
-      <section className="hero">
-        <div className="eyebrow">DEINE GEDANKEN. SORTIERT.</div>
-        <h1>Sprich es aus.<br/><em>Wir ordnen es ein.</em></h1>
-        <p>Gedanken, Aufgaben und Termine – direkt aus deiner Stimme.<br/>Alles bleibt auf diesem Gerät.</p>
-
-        <div className={`recorder ${listening ? "isListening" : ""}`}>
-          <button className="mic" onClick={toggleListening} aria-label={listening ? "Aufnahme stoppen" : "Aufnahme starten"}>{listening ? "■" : "●"}</button>
-          <div className="draft">
-            <textarea value={draft} onChange={e => setDraft(e.target.value)} placeholder={listening ? "Ich höre zu …" : "Tippe hier oder starte die Aufnahme …"} />
-            <div className="recorderBottom"><span>{listening ? "Aufnahme läuft" : "Bereit zum Aufnehmen"}</span><button onClick={addEntry} disabled={!draft.trim()}>Einordnen <span>→</span></button></div>
-          </div>
-        </div>
-        <div className="privacy">◉ Keine Cloud · Keine Anmeldung · Lokal gespeichert</div>
-      </section>
-
-      <section className="inbox">
-        <div className="sectionHead"><div><h2>Deine Inbox</h2><p>Alles, was du zuletzt festgehalten hast.</p></div><input value={query} onChange={e => setQuery(e.target.value)} placeholder="⌕  Durchsuchen …" /></div>
-        <div className="filters">{(["Alle", "Aufgabe", "Termin", "Notiz", "Idee"] as const).map(f => <button className={filter === f ? "active" : ""} onClick={() => setFilter(f)} key={f}>{f}{f === "Alle" && <span>{entries.length}</span>}</button>)}</div>
-        <div className="grid">
-          {visible.map(entry => <article key={entry.id} className="card">
-            <div className="cardTop"><span className={`tag ${colors[entry.kind]}`}>{entry.kind}</span><button onClick={() => setEntries(entries.filter(e => e.id !== entry.id))} aria-label="Löschen">×</button></div>
-            <h3>{entry.title}</h3><p>{entry.detail}</p><footer><span>{entry.created}</span><button>Öffnen →</button></footer>
-          </article>)}
-          {visible.length === 0 && <div className="empty">Hier ist noch nichts. Sprich deinen ersten Gedanken ein.</div>}
-        </div>
-      </section>
-    </main>
-  );
+  return <main>
+    <header className="topbar"><a className="brand" href="./"><span className="logo">V</span><span>Voice Inbox</span></a><a className="inboxLink" href="#inbox">Inbox <b>{entries.length}</b></a></header>
+    <section className="hero">
+      <div className="eyebrow">DEINE GEDANKEN. FESTGEHALTEN.</div><h1>Sprich es aus.<br/><em>In deinem Tempo.</em></h1>
+      <p>Nimm auch längere Gedanken am Stück auf und bearbeite den Text,<br/>bevor du ihn in deiner Inbox ablegst.</p>
+      <div className={`composer ${listening ? "isListening" : ""}`}>
+        <div className="composerHead"><div><strong>Neuer Eintrag</strong><span>{listening ? "Aufnahme läuft – sprich einfach weiter" : "Aufnehmen oder direkt losschreiben"}</span></div><button className="mic" onClick={toggleListening} aria-label={listening ? "Aufnahme stoppen" : "Aufnahme starten"}><span>{listening ? "■" : "●"}</span>{listening ? "Stoppen" : "Aufnehmen"}</button></div>
+        <textarea value={draft} onChange={(event) => { draftRef.current = event.target.value; setDraft(event.target.value); }} placeholder="Hier entsteht dein Text …" aria-label="Text für einen neuen Inbox-Eintrag" />
+        <div className="composerBottom"><span>{draft.length ? `${draft.length} Zeichen` : "Du kannst den erkannten Text jederzeit bearbeiten."}</span><button onClick={addEntry} disabled={!draft.trim()}>In Inbox ablegen <span>→</span></button></div>
+      </div>
+    </section>
+    <section className="inbox" id="inbox">
+      <div className="sectionHead"><div><h2>Deine Inbox</h2><p>Alles, was du zuletzt festgehalten hast.</p></div><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="⌕  Durchsuchen …" aria-label="Inbox durchsuchen" /></div>
+      <div className="filters">{(["Alle", "Aufgabe", "Termin", "Notiz", "Idee"] as const).map((item) => <button className={filter === item ? "active" : ""} onClick={() => setFilter(item)} key={item}>{item}{item === "Alle" && <span>{entries.length}</span>}</button>)}</div>
+      <div className="grid">{visible.map((entry) => <article key={entry.id} className="card"><div className="cardTop"><span className={`tag ${colors[entry.kind]}`}>{entry.kind}</span><button onClick={() => setEntries((current) => current.filter((item) => item.id !== entry.id))} aria-label="Löschen">×</button></div><p className="entryText">{entry.text}</p><footer><span>{entry.created}</span></footer></article>)}{visible.length === 0 && <div className="empty">Hier ist noch nichts. Sprich deinen ersten Gedanken ein.</div>}</div>
+    </section>
+  </main>;
 }
