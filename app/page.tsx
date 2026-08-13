@@ -31,7 +31,9 @@ export default function Home() {
   useEffect(() => {
     const stored = localStorage.getItem("voice-inbox-entries");
     if (stored) setEntries(JSON.parse(stored));
-    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`);
+    }
   }, []);
 
   useEffect(() => { localStorage.setItem("voice-inbox-entries", JSON.stringify(entries)); }, [entries]);
