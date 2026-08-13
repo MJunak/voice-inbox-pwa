@@ -23,6 +23,22 @@ passend zum Rest der App.
 **Fast-Path**: eindeutige Formulierungen werden per Regex direkt ausgeführt,
 ganz ohne Modell (0 ms). Alles andere geht durch Needle 2.
 
+## Voice Input & Sprachen
+
+- **Mikro-Button (●) in der Command-Bar**: klicken, Befehl sprechen — der
+  Interim-Text erscheint live im Eingabefeld, das finale Erkennungsergebnis
+  wird automatisch ausgeführt. Nochmal klicken (■) bricht die Aufnahme ab.
+- **Sprach-Dropdown in der Topbar (DE/ES/EN)**: stellt die Sprache der
+  Web-Speech-Erkennung um — für beide Mikros (Composer + Command-Bar). Die
+  Wahl wird in `localStorage` gespeichert. Auto-Erkennung gibt es in der Web
+  Speech API nicht, daher das Dropdown.
+- **Spanische Befehle** funktionieren auf beiden Pfaden: der Fast-Path kennt
+  z. B. „muestra la lista“, „solo citas“, „borra la última nota“, „busca por
+  X“, „muestra todo“; komplexere Sätze gehen ans Modell (Needle 2 ist
+  mehrsprachig genug, Confidence zeigt die Verlässlichkeit). Die
+  Fuzzy-Resolver mappen spanische Begriffe (tarea/cita/nota/idea,
+  lista/tarjetas) auf die internen Kategorien.
+
 ## Architektur
 
 ```

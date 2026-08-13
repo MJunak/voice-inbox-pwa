@@ -185,6 +185,35 @@ test("Sprachbefehl über die Command-Bar wird automatisch ausgeführt", async ({
   await expect(page.getByRole("button", { name: "Befehl einsprechen" })).toBeVisible();
 });
 
+test("versteht spanische Befehle (Fast-Path)", async ({ page }) => {
+  await seedEntries(page, seed);
+  await page.goto("/");
+  await command(page, "muestra la lista");
+  await expect(page.locator(".row")).toHaveCount(3);
+  await command(page, "borra la última nota");
+  await expect(page.locator(".row")).toHaveCount(2);
+  await expect(page.locator(".row", { hasText: "Buchtipp von Anna" })).toHaveCount(0);
+  await command(page, "solo citas");
+  await expect(page.locator(".row")).toHaveCount(1);
+  await expect(page.locator(".row").first()).toContainText("Zahnarzt");
+  await command(page, "muestra todo");
+  await expect(page.locator(".row")).toHaveCount(2);
+  await command(page, "busca por Rechnung");
+  await expect(page.locator(".row")).toHaveCount(1);
+  await expect(page.locator(".row").first()).toContainText("Rechnung");
+});
+
+test("Sprach-Dropdown stellt die Erkennungssprache um und bleibt gespeichert", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("combobox", { name: /Sprache der Spracherkennung/i }).selectOption("es-ES");
+  await page.getByRole("button", { name: "Befehl einsprechen" }).click();
+  const lang = await page.evaluate(() => (window as unknown as { __activeRecognition?: { lang: string } }).__activeRecognition?.lang);
+  expect(lang).toBe("es-ES");
+  // Persistenz über Reload
+  await page.reload();
+  await expect(page.getByRole("combobox", { name: /Sprache der Spracherkennung/i })).toHaveValue("es-ES");
+});
+
 test("unbekannter Befehl meldet, dass nichts erkannt wurde", async ({ page }) => {
   await seedEntries(page, seed);
   await page.goto("/");

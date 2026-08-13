@@ -14,11 +14,17 @@ type RecognitionConstructor = new () => Recognition;
 
 const KINDS: Kind[] = ["Aufgabe", "Termin", "Notiz", "Idee"];
 const colors: Record<Kind, string> = { Aufgabe: "blue", Termin: "orange", Notiz: "violet", Idee: "green" };
+type SpeechLang = "de-DE" | "es-ES" | "en-US";
+const SPEECH_LANGS: Array<{ value: SpeechLang; label: string }> = [
+  { value: "de-DE", label: "DE" },
+  { value: "es-ES", label: "ES" },
+  { value: "en-US", label: "EN" },
+];
 function classify(text: string): Kind {
   const value = text.toLowerCase();
-  if (/morgen|uhr|termin|treffen|montag|dienstag|mittwoch|donnerstag|freitag/.test(value)) return "Termin";
-  if (/muss|erledigen|machen|aufgabe|todo|erinner/.test(value)) return "Aufgabe";
-  if (/idee|vielleicht|könnte|vorschlag/.test(value)) return "Idee";
+  if (/morgen|uhr|termin|treffen|montag|dienstag|mittwoch|donnerstag|freitag|cita|reunión|reunion|mañana|lunes|martes|miércoles|miercoles|jueves|viernes/.test(value)) return "Termin";
+  if (/muss|erledigen|machen|aufgabe|todo|erinner|tengo que|tarea|pagar/.test(value)) return "Aufgabe";
+  if (/idee|vielleicht|könnte|vorschlag|idea|quizás|quizas|podría|podria/.test(value)) return "Idee";
   return "Notiz";
 }
 function readStoredEntries(): Entry[] {
@@ -47,6 +53,8 @@ export default function Home() {
   const [modelProgress, setModelProgress] = useState(0);
   const [cmdListening, setCmdListening] = useState(false);
   const cmdRecognitionRef = useRef<Recognition | null>(null);
+  const [speechLang, setSpeechLang] = useState<SpeechLang>("de-DE");
+  const speechLangRef = useRef<SpeechLang>("de-DE");
   const [debug, setDebug] = useState<{ query: string; raw: string; message: string; ms: number; path: string; confidence?: number; reasoning?: string } | null>(null);
   const recognitionRef = useRef<Recognition | null>(null);
   const draftRef = useRef("");
@@ -56,7 +64,11 @@ export default function Home() {
   const entriesRef = useRef<Entry[]>([]);
 
   useEffect(() => {
-    const loadTimer = window.setTimeout(() => { setEntries(readStoredEntries()); setLoaded(true); }, 0);
+    const loadTimer = window.setTimeout(() => {
+      const storedLang = localStorage.getItem("voice-inbox-lang") as SpeechLang | null;
+      if (storedLang && SPEECH_LANGS.some((l) => l.value === storedLang)) { setSpeechLang(storedLang); speechLangRef.current = storedLang; }
+      setEntries(readStoredEntries()); setLoaded(true);
+    }, 0);
     if ("serviceWorker" in navigator) navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`);
     return () => { window.clearTimeout(loadTimer); wantsToListenRef.current = false; recognitionRef.current?.stop(); cmdRecognitionRef.current?.stop(); };
   }, []);
@@ -81,7 +93,7 @@ export default function Home() {
 
   function beginRecognition(RecognitionApi: RecognitionConstructor, baseText: string) {
     const recognition = new RecognitionApi();
-    recognition.lang = "de-DE"; recognition.continuous = true; recognition.interimResults = true;
+    recognition.lang = speechLangRef.current; recognition.continuous = true; recognition.interimResults = true;
     sessionStartRef.current = baseText.trimEnd();
     recognition.onresult = (event) => {
       let finalText = ""; let interimText = "";
@@ -193,7 +205,7 @@ export default function Home() {
     const RecognitionApi = speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
     if (!RecognitionApi) { flash("Spracherkennung wird in diesem Browser nicht unterstützt. Nutze Chrome oder Edge."); return; }
     const recognition = new RecognitionApi();
-    recognition.lang = "de-DE"; recognition.continuous = false; recognition.interimResults = true;
+    recognition.lang = speechLangRef.current; recognition.continuous = false; recognition.interimResults = true;
     recognition.onresult = (event) => {
       let finalText = ""; let interimText = "";
       for (let index = 0; index < event.results.length; index += 1) {
@@ -249,8 +261,15 @@ export default function Home() {
     : modelState === "error" ? "Needle nicht geladen"
     : "Needle";
 
+  function changeSpeechLang(lang: SpeechLang) {
+    setSpeechLang(lang); speechLangRef.current = lang;
+    localStorage.setItem("voice-inbox-lang", lang);
+    // laufende Aufnahmen mit alter Sprache beenden
+    wantsToListenRef.current = false; recognitionRef.current?.stop(); cmdRecognitionRef.current?.stop();
+  }
+
   return <main>
-    <header className="topbar"><a className="brand" href="./"><span className="logo">V</span><span>Voice Inbox</span></a><a className="inboxLink" href="#inbox">Inbox <b>{entries.length}</b></a></header>
+    <header className="topbar"><a className="brand" href="./"><span className="logo">V</span><span>Voice Inbox</span></a><div className="topbarRight"><select className="langSelect" value={speechLang} onChange={(event) => changeSpeechLang(event.target.value as SpeechLang)} aria-label="Sprache der Spracherkennung" title="Sprache der Spracherkennung">{SPEECH_LANGS.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}</select><a className="inboxLink" href="#inbox">Inbox <b>{entries.length}</b></a></div></header>
     <section className="hero">
       <div className={`composer ${listening ? "isListening" : ""}`}>
         <div className="composerHead"><div><strong>Neuer Eintrag</strong><span>{listening ? "Aufnahme läuft – sprich einfach weiter" : "Aufnehmen oder direkt losschreiben"}</span></div><button className="mic" onClick={toggleListening} aria-label={listening ? "Aufnahme stoppen" : "Aufnahme starten"}><span>{listening ? "■" : "●"}</span>{listening ? "Stoppen" : "Aufnehmen"}</button></div>
@@ -263,7 +282,7 @@ export default function Home() {
       <form className="commandBar" onSubmit={(event) => { event.preventDefault(); runCommand(); }}>
         <span className="cmdIcon" aria-hidden="true">⌘</span>
         <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder={cmdListening ? "Sprich deinen Befehl …" : "Befehl … z. B. „zeig mir die Liste“ oder „lösche den Zahnarzt-Termin“"} aria-label="Befehl an die App (Needle)" />
-        <button type="button" className={`cmdMic ${cmdListening ? "on" : ""}`} onClick={toggleCommandListening} aria-label={cmdListening ? "Aufnahme stoppen" : "Befehl einsprechen"} title={cmdListening ? "Aufnahme stoppen" : "Befehl einsprechen"}>{cmdListening ? "■" : "🎙"}</button>
+        <button type="button" className={`cmdMic ${cmdListening ? "on" : ""}`} onClick={toggleCommandListening} aria-label={cmdListening ? "Aufnahme stoppen" : "Befehl einsprechen"} title={cmdListening ? "Aufnahme stoppen" : "Befehl einsprechen"}>{cmdListening ? "■" : "●"}</button>
         <span className={`cmdModel ${modelState}`} title="Lokales Needle-Modell (WASM, im Browser)" role="status">{agentBusy && agentStatus ? agentStatus : modelLabel}</span>
         <button type="submit" disabled={agentBusy || !command.trim()}>{agentBusy ? <span className="spinner" aria-label="arbeitet" /> : "Ausführen"}</button>
       </form>

@@ -48,8 +48,10 @@ export const TOOLS_JSON = JSON.stringify(TOOLS);
 // Fast-Path: eindeutige Befehle kosten 0 ms statt ~1,5 s Modell-Inferenz.
 // ---------------------------------------------------------------------------
 
-const DELETE_WORDS = /\b(lösch\w*|delete|entfern\w*|remove|weg)\b/i;
-const LATEST_WORDS = /\b(letzte[nrs]?|neueste[nrs]?|latest|last|newest|jüngste[nrs]?)\b/i;
+// DE/EN/ES. Achtung bei akzentuierten Wörtern: \b greift nicht vor ú/á etc.
+// (JS-\b ist ASCII-basiert), daher dort ohne Wortgrenze matchen.
+const DELETE_WORDS = /\b(lösch\w*|delete|entfern\w*|remove|weg|borra\w*|elimina\w*|quita\w*)\b/i;
+const LATEST_WORDS = /\b(letzte[nrs]?|neueste[nrs]?|latest|last|newest)\b|jüngste|últim[oa]s?|ultim[oa]s?|reciente/i;
 
 // Eindeutige Befehle direkt in Tool-Calls übersetzen – 0 ms, ohne Modell.
 // Konservativ: nur matchen, wenn die Absicht nicht mehrdeutig ist.
@@ -58,37 +60,42 @@ export function tryFastPath(query: string): ToolCall[] | null {
   if (!q) return null;
   const destructive = DELETE_WORDS.test(q);
 
-  // "lösch die letzte notiz" / "delete the latest note"
+  // "lösch die letzte notiz" / "delete the latest note" / "borra la última nota"
   if (destructive && LATEST_WORDS.test(q)) {
     return [{ name: "delete_note", arguments: { match: `letzte ${resolveKind(q.replace(DELETE_WORDS, "").replace(LATEST_WORDS, "")) ?? ""}`.trim() } }];
+  }
+  // "lösche die Suche" / "borra la búsqueda" -> Suche leeren, nichts löschen
+  if (destructive && /búsqueda|busqueda|\bsuche\b|\bsearch\b/.test(q)) {
+    return [{ name: "clear_search", arguments: {} }];
   }
   if (destructive) return null; // andere Löschbefehle brauchen das Modell
 
   // Ansicht
-  if (/\b(listenansicht|zeilenansicht)\b/.test(q) || (/\bliste\b/.test(q) && /\b(zeig|wechsel|schalt|switch|show|ansicht)\b/.test(q))) {
+  const VIEW_VERBS = /\b(zeig|wechsel|schalt|switch|show|ansicht|muestra|cambia|pon|ver|vista|enséñame|ensename)\b/;
+  if (/\b(listenansicht|zeilenansicht)\b/.test(q) || (/\b(liste|lista)\b/.test(q) && VIEW_VERBS.test(q))) {
     return [{ name: "switch_view", arguments: { view: "list" } }];
   }
-  if (/\b(kartenansicht|kachelansicht)\b/.test(q) || (/\b(karten|kacheln|cards)\b/.test(q) && /\b(zeig|wechsel|schalt|switch|show|ansicht)\b/.test(q))) {
+  if (/\b(kartenansicht|kachelansicht)\b/.test(q) || (/\b(karten|kacheln|cards|tarjetas)\b/.test(q) && VIEW_VERBS.test(q))) {
     return [{ name: "switch_view", arguments: { view: "cards" } }];
   }
 
-  // Filter: "zeig (mir) nur termine", "nur aufgaben", "filter ideen"
-  const filterMatch = q.match(/\b(?:nur|filter(?:e|n)?)\s+(?:die\s+|nach\s+)?(aufgaben?|termine?|notizen?|ideen?|tasks?|todos?|appointments?|notes?|ideas?|alles?|alle)\b/);
+  // Filter: "zeig (mir) nur termine", "nur aufgaben", "filter ideen", "solo citas"
+  const filterMatch = q.match(/\b(?:nur|filter(?:e|n)?|solo|sólo|filtra)\s+(?:die\s+|nach\s+|las\s+|los\s+)?(aufgaben?|termine?|notizen?|ideen?|tasks?|todos?|appointments?|notes?|ideas?|tareas?|citas?|notas?|alles?|alle|todo|todas)\b/);
   if (filterMatch) {
     return [{ name: "filter_kind", arguments: { kind: resolveFilter(filterMatch[1]) } }];
   }
-  if (/\b(zeig|filter)\w*\s+(mir\s+)?alles?\b/.test(q) || /\balle (einträge |notizen )?(anzeigen|zeigen)\b/.test(q)) {
+  if (/\b(zeig|filter)\w*\s+(mir\s+)?alles?\b/.test(q) || /\balle (einträge |notizen )?(anzeigen|zeigen)\b/.test(q) || /\bmuestra\s+todo\b/.test(q)) {
     return [{ name: "filter_kind", arguments: { kind: "Alle" } }];
   }
 
-  // Suche: "such(e) (nach) X", "finde X"
-  const searchMatch = query.trim().match(/^(?:such(?:e|t)?|finde?|search(?: for)?)\s+(?:nach\s+)?(.+)$/i);
+  // Suche: "such(e) (nach) X", "finde X", "busca X"
+  const searchMatch = query.trim().match(/^(?:such(?:e|t)?|finde?|search(?: for)?|busca(?:r)?|encuentra)\s+(?:nach\s+|por\s+)?(.+)$/i);
   if (searchMatch) {
     const term = searchMatch[1].trim().replace(/^["„»]|["“«]$/g, "");
     if (/^(löschen|zurücksetzen|leeren|weg|raus|clear|reset)$/i.test(term)) return [{ name: "clear_search", arguments: {} }];
     return [{ name: "search", arguments: { query: term } }];
   }
-  if (/\bsuche?\s+(löschen|zurücksetzen|leeren)\b/.test(q) || /\bclear search\b/.test(q)) {
+  if (/\bsuche?\s+(löschen|zurücksetzen|leeren)\b/.test(q) || /\bclear search\b/.test(q) || /\blimpia\w*\b.*(búsqueda|busqueda)/.test(q)) {
     return [{ name: "clear_search", arguments: {} }];
   }
 
@@ -102,26 +109,28 @@ export function tryFastPath(query: string): ToolCall[] | null {
 function asString(value: unknown): string {
   return typeof value === "string" ? value : String(value ?? "");
 }
-// Fuzzy-Auflösung: das 26M-Modell liefert Enum-Werte oft nicht exakt
+// Fuzzy-Auflösung: das Modell liefert Enum-Werte oft nicht exakt
 // ("Liste" statt "list", "list view" …). Deshalb auf Schlüsselwörter matchen.
+// Deckt Deutsch, Englisch und Spanisch ab.
 function resolveView(value: unknown): View {
   const v = asString(value).toLowerCase();
-  if (/karte|kachel|card|grid/.test(v)) return "cards";
-  if (/list|liste|zeile|row/.test(v)) return "list";
+  if (/karte|kachel|card|grid|tarjeta/.test(v)) return "cards";
+  if (/list|liste|zeile|row|lista/.test(v)) return "list";
   return "cards";
 }
 function resolveKind(value: unknown): Kind | null {
   const v = asString(value).toLowerCase();
   if ((KINDS as string[]).includes(asString(value))) return asString(value) as Kind;
-  if (/aufgabe|task|todo|to-?do|erledig/.test(v)) return "Aufgabe";
-  if (/termin|appointment|kalender|meeting|date/.test(v)) return "Termin";
+  if (/aufgabe|task|todo|to-?do|erledig|tarea/.test(v)) return "Aufgabe";
+  if (/termin|appointment|kalender|meeting|date|cita/.test(v)) return "Termin";
   if (/idee|idea|einfall/.test(v)) return "Idee";
-  if (/notiz|note|memo/.test(v)) return "Notiz";
+  if (/notiz|note|memo|nota/.test(v)) return "Notiz";
   return null;
 }
 function resolveFilter(value: unknown): FilterValue {
   const v = asString(value).toLowerCase();
-  if (!v || /alle|all|alles|everything/.test(v)) return "Alle";
+  // "todo" allein = spanisch "alles"; "todos" bleibt engl. To-dos -> Aufgabe.
+  if (!v || /alle|all\b|alles|everything|\btodas\b|\btodo\b(?!s)/.test(v)) return "Alle";
   return resolveKind(value) ?? "Alle";
 }
 
@@ -139,9 +148,9 @@ function dedupeArgumentKeys(raw: string): string {
   });
 }
 
-// Erkennt positionale Referenzen wie "letzte Notiz" / "latest note", die das
-// Modell als match-Text durchreicht, statt Text-Inhalt zu meinen.
-const POSITIONAL = /\b(letzte[nrs]?|neueste[nrs]?|latest|last|newest|jüngste[nrs]?)\b/i;
+// Erkennt positionale Referenzen wie "letzte Notiz" / "latest note" /
+// "última nota", die das Modell als match-Text durchreicht.
+const POSITIONAL = /\b(letzte[nrs]?|neueste[nrs]?|latest|last|newest)\b|jüngste|últim[oa]s?|ultim[oa]s?|reciente/i;
 
 // Zusatzinfos aus der Needle-2-Antwort (fürs Debug-Panel).
 export function parseModelInfo(raw: string): { confidence?: number; reasoning?: string } {
