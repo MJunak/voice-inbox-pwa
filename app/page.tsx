@@ -45,6 +45,8 @@ export default function Home() {
   const [agentStatus, setAgentStatus] = useState("");
   const [modelState, setModelState] = useState<ModelState>("idle");
   const [modelProgress, setModelProgress] = useState(0);
+  const [cmdListening, setCmdListening] = useState(false);
+  const cmdRecognitionRef = useRef<Recognition | null>(null);
   const [debug, setDebug] = useState<{ query: string; raw: string; message: string; ms: number; path: string; confidence?: number; reasoning?: string } | null>(null);
   const recognitionRef = useRef<Recognition | null>(null);
   const draftRef = useRef("");
@@ -56,7 +58,7 @@ export default function Home() {
   useEffect(() => {
     const loadTimer = window.setTimeout(() => { setEntries(readStoredEntries()); setLoaded(true); }, 0);
     if ("serviceWorker" in navigator) navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`);
-    return () => { window.clearTimeout(loadTimer); wantsToListenRef.current = false; recognitionRef.current?.stop(); };
+    return () => { window.clearTimeout(loadTimer); wantsToListenRef.current = false; recognitionRef.current?.stop(); cmdRecognitionRef.current?.stop(); };
   }, []);
   useEffect(() => { entriesRef.current = entries; if (loaded) localStorage.setItem("voice-inbox-entries", JSON.stringify(entries)); }, [entries, loaded]);
 
@@ -183,8 +185,30 @@ export default function Home() {
     exportJson,
   };
 
-  async function runCommand() {
-    const text = command.trim();
+  // Sprach-Eingabe für die Command-Bar: one-shot-Erkennung (de-DE), Interim-
+  // Text landet live im Eingabefeld, das finale Ergebnis wird direkt ausgeführt.
+  function toggleCommandListening() {
+    if (cmdRecognitionRef.current) { cmdRecognitionRef.current.stop(); return; }
+    const speechWindow = window as typeof window & { SpeechRecognition?: RecognitionConstructor; webkitSpeechRecognition?: RecognitionConstructor };
+    const RecognitionApi = speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
+    if (!RecognitionApi) { flash("Spracherkennung wird in diesem Browser nicht unterstützt. Nutze Chrome oder Edge."); return; }
+    const recognition = new RecognitionApi();
+    recognition.lang = "de-DE"; recognition.continuous = false; recognition.interimResults = true;
+    recognition.onresult = (event) => {
+      let finalText = ""; let interimText = "";
+      for (let index = 0; index < event.results.length; index += 1) {
+        const transcript = event.results[index][0].transcript;
+        if (event.results[index].isFinal) finalText += transcript; else interimText += transcript;
+      }
+      setCommand(finalText || interimText);
+      if (finalText.trim()) { recognition.stop(); runCommand(finalText.trim()); }
+    };
+    recognition.onend = () => { cmdRecognitionRef.current = null; setCmdListening(false); };
+    cmdRecognitionRef.current = recognition; recognition.start(); setCmdListening(true);
+  }
+
+  async function runCommand(textOverride?: string) {
+    const text = (textOverride ?? command).trim();
     if (!text || agentBusy) return;
 
     // Fast-Path: eindeutige Befehle sofort ausführen, ohne Modell (0 ms).
@@ -238,7 +262,8 @@ export default function Home() {
       <div className="sectionHead"><div><h2>Inbox</h2><p>{entries.length} Einträge gespeichert.</p></div><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="⌕  Durchsuchen …" aria-label="Inbox durchsuchen" /></div>
       <form className="commandBar" onSubmit={(event) => { event.preventDefault(); runCommand(); }}>
         <span className="cmdIcon" aria-hidden="true">⌘</span>
-        <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="Befehl … z. B. „zeig mir die Liste“ oder „lösche den Zahnarzt-Termin“" aria-label="Befehl an die App (Needle)" />
+        <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder={cmdListening ? "Sprich deinen Befehl …" : "Befehl … z. B. „zeig mir die Liste“ oder „lösche den Zahnarzt-Termin“"} aria-label="Befehl an die App (Needle)" />
+        <button type="button" className={`cmdMic ${cmdListening ? "on" : ""}`} onClick={toggleCommandListening} aria-label={cmdListening ? "Aufnahme stoppen" : "Befehl einsprechen"} title={cmdListening ? "Aufnahme stoppen" : "Befehl einsprechen"}>{cmdListening ? "■" : "🎙"}</button>
         <span className={`cmdModel ${modelState}`} title="Lokales Needle-Modell (WASM, im Browser)" role="status">{agentBusy && agentStatus ? agentStatus : modelLabel}</span>
         <button type="submit" disabled={agentBusy || !command.trim()}>{agentBusy ? <span className="spinner" aria-label="arbeitet" /> : "Ausführen"}</button>
       </form>

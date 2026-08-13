@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { installSpeechMock, installNeedleMock, seedEntries } from "./helpers";
+import { installSpeechMock, installNeedleMock, seedEntries, emitSpeech } from "./helpers";
 
 // Testet die Needle-Command-Verdrahtung mit einer gemockten Engine:
 // Eingabe -> (gemockte) Needle-Tool-Call-JSON -> Executor -> App-Aktion.
@@ -166,6 +166,23 @@ test("verarbeitet das Needle-2-Envelope-Format", async ({ page }) => {
   await page.getByText("Debug: Inferenz").click();
   await expect(page.locator(".debugPanel").getByText("91.0 %")).toBeVisible();
   await expect(page.locator(".debugPanel").getByText("'ideen' -> kind Idee", { exact: true })).toBeVisible();
+});
+
+test("Sprachbefehl über die Command-Bar wird automatisch ausgeführt", async ({ page }) => {
+  await seedEntries(page, seed);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Befehl einsprechen" }).click();
+  // Interim-Ergebnis erscheint live im Eingabefeld, führt aber nicht aus.
+  await emitSpeech(page, "zeig mir die", false);
+  await expect(page.getByRole("textbox", { name: /Befehl an die App/i })).toHaveValue("zeig mir die");
+  await expect(page.locator(".card")).toHaveCount(3);
+  // Finales Ergebnis -> automatische Ausführung (Fast-Path: Listenansicht).
+  await emitSpeech(page, "zeig mir die liste", true);
+  await expect(page.locator(".row")).toHaveCount(3);
+  await expect(page.locator(".card")).toHaveCount(0);
+  // Erfolgreich ausgeführt -> Eingabefeld geleert, Aufnahme beendet.
+  await expect(page.getByRole("textbox", { name: /Befehl an die App/i })).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Befehl einsprechen" })).toBeVisible();
 });
 
 test("unbekannter Befehl meldet, dass nichts erkannt wurde", async ({ page }) => {
