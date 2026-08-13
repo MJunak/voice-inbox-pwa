@@ -24,4 +24,17 @@ Für einen Produktions-Build:
 pnpm build
 ```
 
+## GitHub Pages
+
+Der Workflow `.github/workflows/deploy-pages.yml` baut und veröffentlicht die
+statische App bei jedem Push auf `main`. Er kann außerdem im Actions-Tab manuell
+gestartet werden. Im Repository muss unter **Settings → Pages** als Quelle
+**GitHub Actions** ausgewählt sein.
+
+Für einen lokalen Pages-Build:
+
+```bash
+pnpm build:pages
+```
+
 Die Spracheingabe funktioniert derzeit am zuverlässigsten in Chrome und Edge. Browser können für ihre Spracherkennung trotz lokal installierter PWA eine Internetverbindung benötigen.

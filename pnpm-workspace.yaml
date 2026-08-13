@@ -1,5 +1,4 @@
-allowBuilds:
-  esbuild: set this to true or false
-  sharp: set this to true or false
-  workerd: set this to true or false
-dangerouslyAllowAllBuilds: true
+onlyBuiltDependencies:
+  - esbuild
+  - sharp
+  - workerd
