@@ -16,6 +16,11 @@ weiterverwendet.
 ## Dateien
 
 - `app.spec.ts` – funktionale Tests (Tippen, Sprache, Filter/Suche, Löschen …).
+- `agent.spec.ts` – Needle-Command-Verdrahtung mit gemockter Engine
+  (deterministisch, ohne Modell-Download), inkl. Fuzzy-Enum-Fällen.
+- `needle-live.spec.ts` – ECHTE WASM-Engine im Browser (Worker + Inferenz).
+  Gated: `RUN_NEEDLE_LIVE=1 WEIGHTS_DIR=<pfad-mit-needle.safetensors+vocab.txt>`;
+  die HF-Downloads werden dabei per page.route aus lokalen Dateien bedient.
 - `screenshots.spec.ts` – erzeugt benannte Screenshots unter `e2e/screens/`
   (`01-empty.png`, `02-entries.png`, `03-composer.png`). Diese PNGs sind der
   visuelle Check vor einem Commit.
@@ -25,6 +30,8 @@ weiterverwendet.
   - `emitSpeech(page, text)` – schiebt ein Erkennungsergebnis in die laufende
     Aufnahme.
   - `seedEntries(page, entries)` – befüllt die Inbox über `localStorage`.
+  - `installNeedleMock(page, rules)` – injiziert `window.__needleEngine`;
+    verhindert zugleich den echten 22-MB-Preload beim App-Start.
 
 ## Artefakte
 

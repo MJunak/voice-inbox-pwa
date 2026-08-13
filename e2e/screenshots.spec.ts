@@ -1,5 +1,5 @@
 import { test } from "@playwright/test";
-import { installSpeechMock, seedEntries } from "./helpers";
+import { installSpeechMock, installNeedleMock, seedEntries } from "./helpers";
 
 // Diese Datei erzeugt keine Assertions, sondern gut benannte Screenshots unter
 // e2e/screens/. Damit lässt sich das visuelle Ergebnis vor einem Commit prüfen.
@@ -14,6 +14,7 @@ const sampleEntries = [
 
 test.beforeEach(async ({ page }) => {
   await installSpeechMock(page);
+  await installNeedleMock(page, []);
 });
 
 test("screenshot: leerer Zustand", async ({ page }) => {

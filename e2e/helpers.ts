@@ -50,6 +50,23 @@ export async function emitSpeech(page: Page, transcript: string, isFinal = true)
   );
 }
 
+// Injiziert eine deterministische Needle-Engine (window.__needleEngine), damit
+// die Command-Verdrahtung ohne den echten 22-MB-Modell-Download getestet werden
+// kann. `rules` bildet einen Query-Teilstring auf die JSON-Antwort ab, die die
+// echte Needle-Engine liefern würde (z. B. '[{"name":"switch_view",...}]').
+export type NeedleRule = { match: string; response: string };
+export async function installNeedleMock(page: Page, rules: NeedleRule[]) {
+  await page.addInitScript((rules) => {
+    (window as unknown as { __needleEngine: unknown }).__needleEngine = {
+      run(query: string) {
+        const q = query.toLowerCase();
+        const rule = (rules as NeedleRule[]).find((r) => q.includes(r.match.toLowerCase()));
+        return Promise.resolve(rule ? rule.response : "[]");
+      },
+    };
+  }, rules);
+}
+
 // Seedet die Inbox über localStorage, damit visuelle Tests einen realistischen
 // Zustand zeigen können, ohne alles per Sprache/Tippen aufzubauen.
 export type SeedEntry = { id: string; kind: string; text: string; created: string };

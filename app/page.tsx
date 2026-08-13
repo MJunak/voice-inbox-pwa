@@ -1,5 +1,9 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { TOOLS_JSON, runToolCalls, type ActionApi } from "./agent/actions";
+import { resolveEngine, preloadEngine } from "./agent/engine";
+
+type ModelState = "idle" | "loading" | "ready" | "error";
 
 type Kind = "Aufgabe" | "Termin" | "Notiz" | "Idee";
 type Entry = { id: string; kind: Kind; text: string; created: string };
@@ -36,18 +40,38 @@ export default function Home() {
   const [view, setView] = useState<View>("cards");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
+  const [command, setCommand] = useState("");
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [agentStatus, setAgentStatus] = useState("");
+  const [modelState, setModelState] = useState<ModelState>("idle");
+  const [modelProgress, setModelProgress] = useState(0);
   const recognitionRef = useRef<Recognition | null>(null);
   const draftRef = useRef("");
   const wantsToListenRef = useRef(false);
   const sessionStartRef = useRef("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const entriesRef = useRef<Entry[]>([]);
 
   useEffect(() => {
     const loadTimer = window.setTimeout(() => { setEntries(readStoredEntries()); setLoaded(true); }, 0);
     if ("serviceWorker" in navigator) navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`);
     return () => { window.clearTimeout(loadTimer); wantsToListenRef.current = false; recognitionRef.current?.stop(); };
   }, []);
-  useEffect(() => { if (loaded) localStorage.setItem("voice-inbox-entries", JSON.stringify(entries)); }, [entries, loaded]);
+  useEffect(() => { entriesRef.current = entries; if (loaded) localStorage.setItem("voice-inbox-entries", JSON.stringify(entries)); }, [entries, loaded]);
+
+  // Needle-Modell im Hintergrund vorladen (einmalig, ~22 MB), damit der erste
+  // Befehl nicht auf den Download warten muss. Bei Testeinspeisung ist es No-op.
+  useEffect(() => {
+    let cancelled = false;
+    const start = () => {
+      setModelState("loading");
+      preloadEngine((loadedBytes, total) => { if (!cancelled) setModelProgress(total ? loadedBytes / total : 0); })
+        .then(() => { if (!cancelled) setModelState("ready"); })
+        .catch(() => { if (!cancelled) setModelState("error"); });
+    };
+    const idle = window.setTimeout(start, 800);
+    return () => { cancelled = true; window.clearTimeout(idle); };
+  }, []);
 
   const visible = useMemo(() => entries.filter((entry) => (filter === "Alle" || entry.kind === filter) && entry.text.toLowerCase().includes(query.toLowerCase())), [entries, filter, query]);
 
@@ -128,6 +152,52 @@ export default function Home() {
     reader.readAsText(file);
   }
 
+  // ActionApi für die Needle-Steuerung. Matching-Operationen zählen betroffene
+  // Einträge über entriesRef (aktueller State) und liefern die Anzahl zurück.
+  const actionApi: ActionApi = {
+    setView,
+    setFilter,
+    setQuery,
+    addEntry: (text) => setEntries((current) => [{ id: crypto.randomUUID(), kind: classify(text), text, created: "Gerade eben" }, ...current]),
+    deleteMatching: (match) => {
+      const needle = match.toLowerCase();
+      const count = entriesRef.current.filter((entry) => entry.text.toLowerCase().includes(needle)).length;
+      if (count) setEntries((current) => current.filter((entry) => !entry.text.toLowerCase().includes(needle)));
+      return count;
+    },
+    setKindMatching: (match, kind) => {
+      const needle = match.toLowerCase();
+      const count = entriesRef.current.filter((entry) => entry.text.toLowerCase().includes(needle)).length;
+      if (count) setEntries((current) => current.map((entry) => (entry.text.toLowerCase().includes(needle) ? { ...entry, kind } : entry)));
+      return count;
+    },
+    exportJson,
+  };
+
+  async function runCommand() {
+    const text = command.trim();
+    if (!text || agentBusy) return;
+    setAgentBusy(true);
+    setAgentStatus(modelState === "ready" ? "Denke nach …" : "Modell wird geladen …");
+    try {
+      const engine = resolveEngine((loadedBytes, total) => setModelProgress(total ? loadedBytes / total : 0));
+      const raw = await engine.run(text, TOOLS_JSON);
+      const result = runToolCalls(raw, actionApi);
+      flash(result.message);
+      if (result.ok) setCommand("");
+    } catch (error) {
+      flash(`Fehler: ${(error as Error).message}`);
+    } finally {
+      setAgentBusy(false); setAgentStatus("");
+    }
+  }
+
+  const modelLabel =
+    modelState === "ready" ? "Needle bereit"
+    : modelState === "loading" ? `Needle lädt … ${Math.round(modelProgress * 100)}%`
+    : modelState === "error" ? "Needle nicht geladen"
+    : "Needle";
+
   return <main>
     <header className="topbar"><a className="brand" href="./"><span className="logo">V</span><span>Voice Inbox</span></a><a className="inboxLink" href="#inbox">Inbox <b>{entries.length}</b></a></header>
     <section className="hero">
@@ -139,6 +209,12 @@ export default function Home() {
     </section>
     <section className="inbox" id="inbox">
       <div className="sectionHead"><div><h2>Inbox</h2><p>{entries.length} Einträge gespeichert.</p></div><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="⌕  Durchsuchen …" aria-label="Inbox durchsuchen" /></div>
+      <form className="commandBar" onSubmit={(event) => { event.preventDefault(); runCommand(); }}>
+        <span className="cmdIcon" aria-hidden="true">⌘</span>
+        <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="Befehl … z. B. „zeig mir die Liste“ oder „lösche den Zahnarzt-Termin“" aria-label="Befehl an die App (Needle)" />
+        <span className={`cmdModel ${modelState}`} title="Lokales Needle-Modell (WASM, im Browser)" role="status">{agentBusy && agentStatus ? agentStatus : modelLabel}</span>
+        <button type="submit" disabled={agentBusy || !command.trim()}>{agentBusy ? <span className="spinner" aria-label="arbeitet" /> : "Ausführen"}</button>
+      </form>
       <div className="toolbar">
         <div className="filters">{(["Alle", "Aufgabe", "Termin", "Notiz", "Idee"] as const).map((item) => <button className={filter === item ? "active" : ""} onClick={() => setFilter(item)} key={item}>{item}{item === "Alle" && <span>{entries.length}</span>}</button>)}</div>
         <div className="viewToggle" role="group" aria-label="Ansicht umschalten">

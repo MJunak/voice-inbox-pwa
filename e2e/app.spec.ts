@@ -1,8 +1,9 @@
 import { test, expect } from "@playwright/test";
-import { installSpeechMock, emitSpeech } from "./helpers";
+import { installSpeechMock, installNeedleMock, emitSpeech } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   await installSpeechMock(page);
+  await installNeedleMock(page, []); // verhindert echten Modell-Download beim Preload
   await page.addInitScript(() => localStorage.clear());
 });
 
