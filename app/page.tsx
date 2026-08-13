@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { TOOLS_JSON, runToolCalls, type ActionApi } from "./agent/actions";
+import { TOOLS_JSON, runToolCalls, tryFastPath, executeToolCall, parseModelInfo, type ActionApi } from "./agent/actions";
 import { resolveEngine, preloadEngine } from "./agent/engine";
 
 type ModelState = "idle" | "loading" | "ready" | "error";
@@ -45,7 +45,7 @@ export default function Home() {
   const [agentStatus, setAgentStatus] = useState("");
   const [modelState, setModelState] = useState<ModelState>("idle");
   const [modelProgress, setModelProgress] = useState(0);
-  const [debug, setDebug] = useState<{ query: string; raw: string; message: string; ms: number; tokens: number } | null>(null);
+  const [debug, setDebug] = useState<{ query: string; raw: string; message: string; ms: number; path: string; confidence?: number; reasoning?: string } | null>(null);
   const recognitionRef = useRef<Recognition | null>(null);
   const draftRef = useRef("");
   const wantsToListenRef = useRef(false);
@@ -60,13 +60,14 @@ export default function Home() {
   }, []);
   useEffect(() => { entriesRef.current = entries; if (loaded) localStorage.setItem("voice-inbox-entries", JSON.stringify(entries)); }, [entries, loaded]);
 
-  // Needle-Modell im Hintergrund vorladen (einmalig, ~22 MB), damit der erste
-  // Befehl nicht auf den Download warten muss. Bei Testeinspeisung ist es No-op.
+  // Needle-2-Modell im Hintergrund vorladen (einmalig, ~14 MB) und die Tools
+  // gleich binden, damit der erste Befehl sofort inferieren kann. Bei
+  // Testeinspeisung (Mock-Engine) ist es No-op.
   useEffect(() => {
     let cancelled = false;
     const start = () => {
       setModelState("loading");
-      preloadEngine((loadedBytes, total) => { if (!cancelled) setModelProgress(total ? loadedBytes / total : 0); })
+      preloadEngine(TOOLS_JSON, (loadedBytes, total) => { if (!cancelled) setModelProgress(total ? loadedBytes / total : 0); })
         .then(() => { if (!cancelled) setModelState("ready"); })
         .catch(() => { if (!cancelled) setModelState("error"); });
     };
@@ -185,18 +186,28 @@ export default function Home() {
   async function runCommand() {
     const text = command.trim();
     if (!text || agentBusy) return;
+
+    // Fast-Path: eindeutige Befehle sofort ausführen, ohne Modell (0 ms).
+    const fastCalls = tryFastPath(text);
+    if (fastCalls) {
+      const results = fastCalls.map((call) => executeToolCall(call, actionApi));
+      const message = results.map((r) => r.message).join(" · ");
+      setDebug({ query: text, raw: JSON.stringify(fastCalls), message, ms: 0, path: "Fast-Path (Regex, ohne Modell)" });
+      flash(message);
+      if (results.every((r) => r.ok)) setCommand("");
+      return;
+    }
+
     setAgentBusy(true);
     setAgentStatus(modelState === "ready" ? "Denke nach …" : "Modell wird geladen …");
-    setDebug({ query: text, raw: "", message: "", ms: 0, tokens: 0 });
+    setDebug({ query: text, raw: "", message: "", ms: 0, path: "Needle 2 (WASM)" });
     const start = performance.now();
     try {
       const engine = resolveEngine((loadedBytes, total) => setModelProgress(total ? loadedBytes / total : 0));
-      // Token-Stream live ins Debug-Panel schreiben.
-      const raw = await engine.run(text, TOOLS_JSON, (piece) => {
-        setDebug((d) => d && { ...d, raw: d.raw + piece, tokens: d.tokens + 1, ms: performance.now() - start });
-      });
+      const raw = await engine.run(text, TOOLS_JSON);
       const result = runToolCalls(raw, actionApi);
-      setDebug((d) => d && { ...d, raw, message: result.message, ms: performance.now() - start });
+      const info = parseModelInfo(raw);
+      setDebug((d) => d && { ...d, raw, message: result.message, ms: performance.now() - start, ...info });
       flash(result.message);
       if (result.ok) setCommand("");
     } catch (error) {
@@ -235,10 +246,13 @@ export default function Home() {
         <summary>Debug: Inferenz</summary>
         {debug ? <dl>
           <dt>Befehl</dt><dd>{debug.query}</dd>
+          <dt>Pfad</dt><dd>{debug.path}</dd>
           <dt>Roh-Ausgabe</dt><dd><code className={agentBusy ? "streaming" : ""}>{debug.raw || (agentBusy ? "…" : "—")}</code></dd>
+          {debug.reasoning && <><dt>Reasoning</dt><dd>{debug.reasoning}</dd></>}
+          {typeof debug.confidence === "number" && <><dt>Confidence</dt><dd>{(debug.confidence * 100).toFixed(1)} %</dd></>}
           <dt>Ergebnis</dt><dd>{debug.message || (agentBusy ? "läuft …" : "—")}</dd>
-          <dt>Dauer</dt><dd>{(debug.ms / 1000).toFixed(1)} s · {debug.tokens} Tokens{debug.ms > 0 && debug.tokens > 0 ? ` · ${(debug.tokens / (debug.ms / 1000)).toFixed(1)} tok/s` : ""}</dd>
-        </dl> : <p className="debugEmpty">Noch kein Befehl ausgeführt. Die Roh-Ausgabe des Modells erscheint hier live, Token für Token.</p>}
+          <dt>Dauer</dt><dd>{debug.ms < 1 ? "sofort" : `${(debug.ms / 1000).toFixed(1)} s`}</dd>
+        </dl> : <p className="debugEmpty">Noch kein Befehl ausgeführt. Hier erscheinen Roh-Ausgabe, Reasoning und Confidence des Modells.</p>}
       </details>
       <div className="toolbar">
         <div className="filters">{(["Alle", "Aufgabe", "Termin", "Notiz", "Idee"] as const).map((item) => <button className={filter === item ? "active" : ""} onClick={() => setFilter(item)} key={item}>{item}{item === "Alle" && <span>{entries.length}</span>}</button>)}</div>

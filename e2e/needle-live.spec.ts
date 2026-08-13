@@ -2,28 +2,37 @@ import { test, expect } from "@playwright/test";
 import { existsSync, readFileSync } from "node:fs";
 import { seedEntries } from "./helpers";
 
-// ECHTER End-to-End-Test der Needle-WASM-Engine im Browser (Worker + Inferenz).
-// Läuft nur mit RUN_NEEDLE_LIVE=1 und wenn die Gewichte lokal vorliegen; die
+// ECHTER End-to-End-Test der Needle-2-WASM-Engine im Browser (Worker + Inferenz).
+// Läuft nur mit RUN_NEEDLE_LIVE=1 und wenn die Assets lokal vorliegen; die
 // HF-URLs werden per Route aus lokalen Dateien bedient (schnell/offline).
+// Benötigte Dateien in WEIGHTS_DIR: needle.wasm (Engine) + needle2.cact (Modell),
+// z. B. via: curl -L https://huggingface.co/Cactus-Compute/needle2/resolve/main/wasm/needle.wasm
 // Aufruf: RUN_NEEDLE_LIVE=1 WEIGHTS_DIR=<pfad> npx playwright test needle-live.spec.ts
 
 const WEIGHTS_DIR = process.env.WEIGHTS_DIR ?? "";
-const weightsPath = `${WEIGHTS_DIR}/needle.safetensors`;
-const vocabPath = `${WEIGHTS_DIR}/vocab.txt`;
-const enabled = process.env.RUN_NEEDLE_LIVE === "1" && WEIGHTS_DIR && existsSync(weightsPath) && existsSync(vocabPath);
+const wasmPath = `${WEIGHTS_DIR}/needle.wasm`;
+const cactPath = `${WEIGHTS_DIR}/needle2.cact`;
+const enabled = process.env.RUN_NEEDLE_LIVE === "1" && WEIGHTS_DIR && existsSync(wasmPath) && existsSync(cactPath);
 
-test.skip(() => !enabled, "RUN_NEEDLE_LIVE=1 und WEIGHTS_DIR mit needle.safetensors/vocab.txt nötig");
+test.skip(() => !enabled, "RUN_NEEDLE_LIVE=1 und WEIGHTS_DIR mit needle.wasm/needle2.cact nötig");
 
-test("echte Needle-Engine wechselt die Ansicht per Befehl", async ({ page }) => {
+test("echte Needle-2-Engine führt Befehle aus (Fast-Path + Modell)", async ({ page }) => {
   test.setTimeout(120_000);
 
-  // HF-Downloads aus lokalen Dateien bedienen (kein echter Netzzugriff nötig).
-  await page.route(/needle\.safetensors/, (route) =>
-    route.fulfill({ status: 200, headers: { "content-type": "application/octet-stream", "access-control-allow-origin": "*" }, body: readFileSync(weightsPath) }),
-  );
-  await page.route(/vocab\.txt/, (route) =>
-    route.fulfill({ status: 200, headers: { "content-type": "text/plain", "access-control-allow-origin": "*" }, body: readFileSync(vocabPath) }),
-  );
+  // Assets über einen lokalen HTTP-Server bedienen. WICHTIG: kein
+  // page.route/fulfill – Playwright schneidet große Binaries bei Fetches aus
+  // Web Workern ab (beobachtet: 13,7 MB -> 17 KB), was das Modell korrumpiert.
+  const { createServer } = await import("node:http");
+  const server = createServer((req, res) => {
+    const file = req.url?.includes("cact") ? cactPath : wasmPath;
+    res.writeHead(200, { "content-type": "application/octet-stream", "access-control-allow-origin": "*" });
+    res.end(readFileSync(file));
+  });
+  await new Promise<void>((resolve) => server.listen(8917, resolve));
+  await page.addInitScript(() => {
+    (window as unknown as { __NEEDLE2_WASM_URL?: string; __NEEDLE2_CACT_URL?: string }).__NEEDLE2_WASM_URL = "http://localhost:8917/needle.wasm";
+    (window as unknown as { __NEEDLE2_WASM_URL?: string; __NEEDLE2_CACT_URL?: string }).__NEEDLE2_CACT_URL = "http://localhost:8917/needle2.cact";
+  });
 
   await seedEntries(page, [
     { id: "a", kind: "Aufgabe", text: "Rechnung schreiben", created: "Gerade eben" },
@@ -32,22 +41,28 @@ test("echte Needle-Engine wechselt die Ansicht per Befehl", async ({ page }) => 
   ]);
   await page.goto("/");
 
-  // Modell wird geladen -> Chip "Needle bereit".
-  await expect(page.locator(".cmdModel.ready")).toBeVisible({ timeout: 45_000 });
+  // Preload: Modell wird geladen und Tools gebunden -> Chip "Needle bereit".
+  await expect(page.locator(".cmdModel.ready")).toBeVisible({ timeout: 60_000 });
 
-  // Echter Befehl -> echte Inferenz -> Ansicht wechselt auf Liste.
-  await page.getByRole("textbox", { name: /Befehl an die App/i }).fill("zeig mir die Liste");
-  await page.getByRole("button", { name: "Ausführen" }).click();
-  await expect(page.locator(".row")).toHaveCount(3, { timeout: 15_000 });
+  const input = page.getByRole("textbox", { name: /Befehl an die App/i });
+  const submit = page.getByRole("button", { name: "Ausführen" });
 
-  // Und ein echter Lösch-Befehl per Texttreffer.
-  await page.getByRole("textbox", { name: /Befehl an die App/i }).fill("lösche den Zahnarzt Termin");
-  await page.getByRole("button", { name: "Ausführen" }).click();
-  await expect(page.locator(".row")).toHaveCount(2, { timeout: 20_000 });
+  // 1) Fast-Path (ohne Modell, sofort): Listenansicht.
+  await input.fill("zeig mir die Liste");
+  await submit.click();
+  await expect(page.locator(".row")).toHaveCount(3);
 
-  // Positionale Referenz (exakt der Fall aus dem Nutzer-Feedback):
-  await page.getByRole("textbox", { name: /Befehl an die App/i }).fill("Lösch die letzte Notiz");
-  await page.getByRole("button", { name: "Ausführen" }).click();
-  await expect(page.locator(".row")).toHaveCount(1, { timeout: 20_000 });
-  await expect(page.locator(".row", { hasText: "Buchtipp von Anna" })).toHaveCount(0);
+  // 2) Echte Inferenz: Notiz anlegen (im Browser verifizierter Modell-Fall).
+  await input.fill("leg eine Notiz an: Milch kaufen");
+  await submit.click();
+  await expect(page.locator(".row")).toHaveCount(4, { timeout: 30_000 });
+  await expect(page.locator(".row", { hasText: "Milch kaufen" })).toHaveCount(1);
+
+  // 3) Fast-Path positional: neueste Notiz (= gerade angelegte) löschen.
+  await input.fill("Lösch die letzte Notiz");
+  await submit.click();
+  await expect(page.locator(".row")).toHaveCount(3);
+  await expect(page.locator(".row", { hasText: "Milch kaufen" })).toHaveCount(0);
+
+  server.close();
 });

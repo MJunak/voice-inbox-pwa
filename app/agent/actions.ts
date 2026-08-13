@@ -27,23 +27,77 @@ export type ExecResult = { ok: boolean; message: string };
 
 const KINDS: Kind[] = ["Aufgabe", "Termin", "Notiz", "Idee"];
 
-// Tool-Definitionen im OpenAI-Function-Format. Needle akzeptiert dieses Format
-// und liefert `[{"name": ..., "arguments": {...}}]` zurück.
-// BEWUSST kompakt gehalten (kurze englische Beschreibungen, keine Parameter-
-// Beschreibungen): die Kontextlänge dominiert die Inferenzzeit des 26M-Modells
-// (gemessen: ~9–14 s mit langen deutschen Texten vs. ~5–7 s mit dieser Liste).
+// Tool-Definitionen im Needle-2-Format (flach: name/description/parameters).
+// Die Liste wird beim Engine-Init einmalig gebunden (KV-Sinks) – ihre Länge
+// kostet danach pro Anfrage nichts mehr. Beschreibungen knapp und englisch,
+// so ist das Modell trainiert.
 export const TOOLS = [
-  { type: "function", function: { name: "switch_view", description: "Switch between cards view and list view", parameters: { type: "object", properties: { view: { type: "string", enum: ["cards", "list"] } }, required: ["view"] } } },
-  { type: "function", function: { name: "filter_kind", description: "Filter notes by category", parameters: { type: "object", properties: { kind: { type: "string", enum: ["Alle", ...KINDS] } }, required: ["kind"] } } },
-  { type: "function", function: { name: "search", description: "Search notes", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } } },
-  { type: "function", function: { name: "clear_search", description: "Clear search", parameters: { type: "object", properties: {}, required: [] } } },
-  { type: "function", function: { name: "add_note", description: "Add a new note", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } } },
-  { type: "function", function: { name: "delete_note", description: "Delete notes matching text, or the latest note", parameters: { type: "object", properties: { match: { type: "string" } }, required: ["match"] } } },
-  { type: "function", function: { name: "set_kind", description: "Change category of notes matching text", parameters: { type: "object", properties: { match: { type: "string" }, kind: { type: "string", enum: KINDS } }, required: ["match", "kind"] } } },
-  { type: "function", function: { name: "export_data", description: "Export notes as JSON", parameters: { type: "object", properties: {}, required: [] } } },
+  { name: "switch_view", description: "Switch the notes inbox display between cards view and list view", parameters: { type: "object", properties: { view: { type: "string", enum: ["cards", "list"] } }, required: ["view"] } },
+  { name: "filter_kind", description: "Filter notes by category", parameters: { type: "object", properties: { kind: { type: "string", enum: ["Alle", ...KINDS] } }, required: ["kind"] } },
+  { name: "search", description: "Search notes", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
+  { name: "clear_search", description: "Clear search", parameters: { type: "object", properties: {}, required: [] } },
+  { name: "add_note", description: "Add a new note", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
+  { name: "delete_note", description: "Delete notes matching text, or the latest note", parameters: { type: "object", properties: { match: { type: "string" } }, required: ["match"] } },
+  { name: "set_kind", description: "Change category of notes matching text", parameters: { type: "object", properties: { match: { type: "string" }, kind: { type: "string", enum: KINDS } }, required: ["match", "kind"] } },
+  { name: "export_data", description: "Export notes as JSON", parameters: { type: "object", properties: {}, required: [] } },
 ] as const;
 
 export const TOOLS_JSON = JSON.stringify(TOOLS);
+
+// ---------------------------------------------------------------------------
+// Fast-Path: eindeutige Befehle kosten 0 ms statt ~1,5 s Modell-Inferenz.
+// ---------------------------------------------------------------------------
+
+const DELETE_WORDS = /\b(lösch\w*|delete|entfern\w*|remove|weg)\b/i;
+const LATEST_WORDS = /\b(letzte[nrs]?|neueste[nrs]?|latest|last|newest|jüngste[nrs]?)\b/i;
+
+// Eindeutige Befehle direkt in Tool-Calls übersetzen – 0 ms, ohne Modell.
+// Konservativ: nur matchen, wenn die Absicht nicht mehrdeutig ist.
+export function tryFastPath(query: string): ToolCall[] | null {
+  const q = query.trim().toLowerCase();
+  if (!q) return null;
+  const destructive = DELETE_WORDS.test(q);
+
+  // "lösch die letzte notiz" / "delete the latest note"
+  if (destructive && LATEST_WORDS.test(q)) {
+    return [{ name: "delete_note", arguments: { match: `letzte ${resolveKind(q.replace(DELETE_WORDS, "").replace(LATEST_WORDS, "")) ?? ""}`.trim() } }];
+  }
+  if (destructive) return null; // andere Löschbefehle brauchen das Modell
+
+  // Ansicht
+  if (/\b(listenansicht|zeilenansicht)\b/.test(q) || (/\bliste\b/.test(q) && /\b(zeig|wechsel|schalt|switch|show|ansicht)\b/.test(q))) {
+    return [{ name: "switch_view", arguments: { view: "list" } }];
+  }
+  if (/\b(kartenansicht|kachelansicht)\b/.test(q) || (/\b(karten|kacheln|cards)\b/.test(q) && /\b(zeig|wechsel|schalt|switch|show|ansicht)\b/.test(q))) {
+    return [{ name: "switch_view", arguments: { view: "cards" } }];
+  }
+
+  // Filter: "zeig (mir) nur termine", "nur aufgaben", "filter ideen"
+  const filterMatch = q.match(/\b(?:nur|filter(?:e|n)?)\s+(?:die\s+|nach\s+)?(aufgaben?|termine?|notizen?|ideen?|tasks?|todos?|appointments?|notes?|ideas?|alles?|alle)\b/);
+  if (filterMatch) {
+    return [{ name: "filter_kind", arguments: { kind: resolveFilter(filterMatch[1]) } }];
+  }
+  if (/\b(zeig|filter)\w*\s+(mir\s+)?alles?\b/.test(q) || /\balle (einträge |notizen )?(anzeigen|zeigen)\b/.test(q)) {
+    return [{ name: "filter_kind", arguments: { kind: "Alle" } }];
+  }
+
+  // Suche: "such(e) (nach) X", "finde X"
+  const searchMatch = query.trim().match(/^(?:such(?:e|t)?|finde?|search(?: for)?)\s+(?:nach\s+)?(.+)$/i);
+  if (searchMatch) {
+    const term = searchMatch[1].trim().replace(/^["„»]|["“«]$/g, "");
+    if (/^(löschen|zurücksetzen|leeren|weg|raus|clear|reset)$/i.test(term)) return [{ name: "clear_search", arguments: {} }];
+    return [{ name: "search", arguments: { query: term } }];
+  }
+  if (/\bsuche?\s+(löschen|zurücksetzen|leeren)\b/.test(q) || /\bclear search\b/.test(q)) {
+    return [{ name: "clear_search", arguments: {} }];
+  }
+
+  // Export
+  if (/\bexport\w*\b/.test(q)) return [{ name: "export_data", arguments: {} }];
+
+  return null;
+}
+
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value : String(value ?? "");
@@ -89,13 +143,30 @@ function dedupeArgumentKeys(raw: string): string {
 // Modell als match-Text durchreicht, statt Text-Inhalt zu meinen.
 const POSITIONAL = /\b(letzte[nrs]?|neueste[nrs]?|latest|last|newest|jüngste[nrs]?)\b/i;
 
-// Normalisiert die (evtl. unterschiedliche) Needle-Ausgabe in ToolCall[].
+// Zusatzinfos aus der Needle-2-Antwort (fürs Debug-Panel).
+export function parseModelInfo(raw: string): { confidence?: number; reasoning?: string } {
+  try {
+    const data = JSON.parse(raw) as { confidence?: number; reasoning?: string | null };
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      return { confidence: data.confidence, reasoning: data.reasoning ?? undefined };
+    }
+  } catch { /* Mock-/Legacy-Format ohne Envelope */ }
+  return {};
+}
+
+// Normalisiert die Needle-Ausgabe in ToolCall[]. Unterstützt:
+// - Needle 2: {"type":"call","function_calls":[{name,arguments}],...}
+// - Legacy/Mocks: [{name,arguments}] oder [{"function":{name,arguments}}]
 export function parseToolCalls(raw: string): ToolCall[] {
   let data: unknown;
   try {
     data = JSON.parse(dedupeArgumentKeys(raw));
   } catch {
     return [];
+  }
+  // Needle-2-Envelope auspacken
+  if (data && typeof data === "object" && !Array.isArray(data) && Array.isArray((data as { function_calls?: unknown }).function_calls)) {
+    data = (data as { function_calls: unknown[] }).function_calls;
   }
   const list = Array.isArray(data) ? data : [data];
   const calls: ToolCall[] = [];

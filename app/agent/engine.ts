@@ -1,6 +1,8 @@
 // Needle-Engine hinter einer schmalen Schnittstelle.
-// - Echte Implementierung: needle-rs (WASM) in einem Web Worker (off-main-thread,
-//   damit die ~3–4 s Inferenz die UI nicht einfrieren).
+// - Echte Implementierung: Needle 2 (offizielles Cactus-WASM) in einem Web
+//   Worker. Tools werden beim Preload einmalig gebunden; eine Anfrage kostet
+//   danach ~1,5 s (statt 5–8 s bei Needle 1, wo der Tool-Kontext jedes Mal
+//   neu encodiert wurde).
 // - Im Test wird über window.__needleEngine eine deterministische Mock-Engine
 //   injiziert, sodass die Verdrahtung ohne Worker/Modell-Download testbar ist.
 
@@ -21,7 +23,7 @@ function injected(): NeedleEngine | undefined {
 
 let worker: Worker | null = null;
 let seq = 0;
-const pending = new Map<number, { resolve: (v: string) => void; reject: (e: Error) => void; onToken?: (piece: string) => void }>();
+const pending = new Map<number, { resolve: (v: string) => void; reject: (e: Error) => void }>();
 let progressCb: ProgressCb | null = null;
 
 function getWorker(): Worker {
@@ -31,10 +33,6 @@ function getWorker(): Worker {
       const data = event.data ?? {};
       if (data.type === "progress") {
         progressCb?.(data.loaded, data.total);
-        return;
-      }
-      if (data.type === "token") {
-        pending.get(data.id)?.onToken?.(data.piece as string);
         return;
       }
       const entry = pending.get(data.id);
@@ -51,27 +49,34 @@ function getWorker(): Worker {
   return worker;
 }
 
-function call(type: "load" | "run", payload: Record<string, unknown>, onToken?: (piece: string) => void): Promise<string> {
+// Test-/Debug-Overrides für die Asset-URLs (z. B. lokaler Server im E2E-Test;
+// Playwrights route.fulfill schneidet große Binaries bei Worker-Fetches ab).
+function urlOverrides(): { wasmUrl?: string; cactUrl?: string } {
+  const w = window as unknown as { __NEEDLE2_WASM_URL?: string; __NEEDLE2_CACT_URL?: string };
+  return { wasmUrl: w.__NEEDLE2_WASM_URL, cactUrl: w.__NEEDLE2_CACT_URL };
+}
+
+function call(type: "load" | "run", payload: Record<string, unknown>): Promise<string> {
   const id = ++seq;
   return new Promise<string>((resolve, reject) => {
-    pending.set(id, { resolve, reject, onToken });
-    getWorker().postMessage({ id, type, payload });
+    pending.set(id, { resolve, reject });
+    getWorker().postMessage({ id, type, payload: { ...urlOverrides(), ...payload } });
   });
 }
 
-// Lädt das Modell im Worker vor (einmalig). Bei injizierter Test-Engine No-op.
-export function preloadEngine(onProgress?: ProgressCb): Promise<void> {
+// Lädt Modell + Engine im Worker vor und bindet die Tool-Liste (einmalig).
+// Bei injizierter Test-Engine No-op.
+export function preloadEngine(toolsJson: string, onProgress?: ProgressCb): Promise<void> {
   if (injected()) return Promise.resolve();
   progressCb = onProgress ?? progressCb;
-  return call("load", {}).then(() => undefined);
+  return call("load", { tools: toolsJson }).then(() => undefined);
 }
 
 const workerEngine: NeedleEngine = {
-  run: (query, tools, onToken) => call("run", { query, tools }, onToken),
+  run: (query, tools) => call("run", { query, tools }),
 };
 
-// Liefert die injizierte Test-Engine, sonst die Worker-Engine (synchron;
-// das eigentliche Laden passiert lazy im Worker bzw. via preloadEngine).
+// Liefert die injizierte Test-Engine, sonst die Worker-Engine.
 export function resolveEngine(onProgress?: ProgressCb): NeedleEngine {
   const mock = injected();
   if (mock) return mock;

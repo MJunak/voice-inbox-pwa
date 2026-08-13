@@ -18,7 +18,7 @@ test.beforeEach(async ({ page }) => {
     { match: "karten", response: '[{"name":"switch_view","arguments":{"view":"cards"}}]' },
     { match: "zahnarzt löschen", response: '[{"name":"delete_note","arguments":{"match":"Zahnarzt"}}]' },
     { match: "nur termine", response: '[{"name":"filter_kind","arguments":{"kind":"Termin"}}]' },
-    { match: "such", response: '[{"name":"search","arguments":{"query":"Anna"}}]' },
+    { match: "wo war", response: '[{"name":"search","arguments":{"query":"Anna"}}]' },
     { match: "aufgabe machen", response: '[{"name":"set_kind","arguments":{"match":"Buchtipp","kind":"Aufgabe"}}]' },
     { match: "notiz anlegen", response: '[{"name":"add_note","arguments":{"text":"Frisch angelegt per Befehl"}}]' },
     // Fuzzy-Ausgaben, wie sie das echte 26M-Modell liefert (nicht exakt der Enum-Wert):
@@ -29,6 +29,8 @@ test.beforeEach(async ({ page }) => {
     { match: "letzte notiz", response: '[{"name":"delete_note","arguments":{"match":"letzte Notiz"}}]' },
     // Doppelter Key mit Parameter-Echo (real beobachtete Modell-Ausgabe).
     { match: "dupkey", response: '[{"name":"filter_kind","arguments":{"kind":"Termin","kind":"kind"}}]' },
+    // Needle-2-Envelope (echtes Antwortformat inkl. Metadaten).
+    { match: "envelope", response: '{"type":"call","success":true,"error":null,"function_calls":[{"name":"filter_kind","arguments":{"kind":"Idee"}}],"reasoning":"\'ideen\' -> kind Idee","confidence":0.91}' },
   ]);
 });
 
@@ -64,13 +66,22 @@ test("Befehl filtert nach Kategorie", async ({ page }) => {
   await expect(page.locator(".card").first()).toContainText("Zahnarzt");
 });
 
-test("Befehl durchsucht die Inbox", async ({ page }) => {
+test("Befehl durchsucht die Inbox (Fast-Path)", async ({ page }) => {
   await seedEntries(page, seed);
   await page.goto("/");
-  await command(page, "such nach etwas");
+  await command(page, "such nach Anna");
   await expect(page.getByRole("textbox", { name: /Inbox durchsuchen/i })).toHaveValue("Anna");
   await expect(page.locator(".card")).toHaveCount(1);
   await expect(page.locator(".card").first()).toContainText("Anna");
+});
+
+test("Befehl durchsucht die Inbox (Modellpfad)", async ({ page }) => {
+  await seedEntries(page, seed);
+  await page.goto("/");
+  // Formulierung, die der Fast-Path nicht abdeckt -> geht durch die (Mock-)Engine.
+  await command(page, "wo war das mit Anna");
+  await expect(page.getByRole("textbox", { name: /Inbox durchsuchen/i })).toHaveValue("Anna");
+  await expect(page.locator(".card")).toHaveCount(1);
 });
 
 test("Befehl ändert die Kategorie eines Eintrags", async ({ page }) => {
@@ -123,14 +134,38 @@ test("übersteht doppelte Argument-Keys (Parameter-Echo)", async ({ page }) => {
   await expect(page.locator(".card").first()).toContainText("Zahnarzt");
 });
 
-test("Debug-Panel zeigt Roh-Ausgabe und Dauer der Inferenz", async ({ page }) => {
+test("Debug-Panel zeigt Fast-Path-Ausführung", async ({ page }) => {
   await seedEntries(page, seed);
   await page.goto("/");
-  await command(page, "zeig mir die liste");
+  await command(page, "zeig mir die liste"); // Fast-Path, ohne Modell
   await page.getByText("Debug: Inferenz").click();
   const panel = page.locator(".debugPanel");
   await expect(panel.locator("code")).toContainText('"name":"switch_view"');
-  await expect(panel.getByText(/Tokens/)).toBeVisible();
+  await expect(panel.getByText("Fast-Path", { exact: false })).toBeVisible();
+  await expect(panel.getByText("sofort")).toBeVisible();
+});
+
+test("Debug-Panel zeigt Modellpfad mit Envelope-Infos", async ({ page }) => {
+  await seedEntries(page, seed);
+  await page.goto("/");
+  // Needle-2-Envelope inkl. reasoning/confidence über den Mock zurückgeben.
+  await command(page, "wo war das mit Anna");
+  await page.getByText("Debug: Inferenz").click();
+  const panel = page.locator(".debugPanel");
+  await expect(panel.getByText("Needle 2 (WASM)")).toBeVisible();
+  await expect(panel.locator("code")).toContainText('"name":"search"');
+});
+
+test("verarbeitet das Needle-2-Envelope-Format", async ({ page }) => {
+  await seedEntries(page, [...seed, { id: "d", kind: "Idee", text: "App-Idee festhalten", created: "Gestern" }]);
+  await page.goto("/");
+  await command(page, "envelope bitte");
+  await expect(page.locator(".card")).toHaveCount(1);
+  await expect(page.locator(".card").first()).toContainText("App-Idee");
+  // Metadaten aus dem Envelope landen im Debug-Panel.
+  await page.getByText("Debug: Inferenz").click();
+  await expect(page.locator(".debugPanel").getByText("91.0 %")).toBeVisible();
+  await expect(page.locator(".debugPanel").getByText("'ideen' -> kind Idee", { exact: true })).toBeVisible();
 });
 
 test("unbekannter Befehl meldet, dass nichts erkannt wurde", async ({ page }) => {

@@ -17,10 +17,13 @@ weiterverwendet.
 
 - `app.spec.ts` – funktionale Tests (Tippen, Sprache, Filter/Suche, Löschen …).
 - `agent.spec.ts` – Needle-Command-Verdrahtung mit gemockter Engine
-  (deterministisch, ohne Modell-Download), inkl. Fuzzy-Enum-Fällen.
-- `needle-live.spec.ts` – ECHTE WASM-Engine im Browser (Worker + Inferenz).
-  Gated: `RUN_NEEDLE_LIVE=1 WEIGHTS_DIR=<pfad-mit-needle.safetensors+vocab.txt>`;
-  die HF-Downloads werden dabei per page.route aus lokalen Dateien bedient.
+  (deterministisch, ohne Modell-Download), inkl. Fuzzy-Enum-, Envelope- und
+  Fast-Path-Fällen.
+- `needle-live.spec.ts` – ECHTE Needle-2-WASM-Engine im Browser (Worker +
+  Inferenz). Gated: `RUN_NEEDLE_LIVE=1 WEIGHTS_DIR=<pfad>` mit `needle.wasm` +
+  `needle2.cact` (von huggingface.co/Cactus-Compute/needle2). Die Assets werden
+  über einen lokalen HTTP-Server bedient – NICHT über page.route/fulfill:
+  Playwright schneidet große Binaries bei Fetches aus Web Workern ab.
 - `screenshots.spec.ts` – erzeugt benannte Screenshots unter `e2e/screens/`
   (`01-empty.png`, `02-entries.png`, `03-composer.png`). Diese PNGs sind der
   visuelle Check vor einem Commit.

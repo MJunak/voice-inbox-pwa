@@ -14,10 +14,9 @@
     "test": "pnpm build && node --test tests/rendered-html.test.mjs",
     "test:e2e": "playwright test",
     "test:e2e:shots": "playwright test screenshots.spec.ts",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern dist-pages --ignore-pattern .next"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern dist-pages --ignore-pattern .next --ignore-pattern app/agent/vendor"
   },
   "dependencies": {
-    "needle-rs": "^0.1.0",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },
