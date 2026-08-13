@@ -13,6 +13,13 @@
 # testing
 /coverage
 
+# playwright e2e artifacts (screenshots are generated on demand)
+/e2e/artifacts/
+/e2e/report/
+/e2e/screens/
+/test-results/
+/playwright-report/
+
 # next.js
 /.next/
 /.vinext/
@@ -38,3 +45,4 @@ yarn-error.log*
 /.wrangler/
 /outputs/
 /work/
+/dist-pages/

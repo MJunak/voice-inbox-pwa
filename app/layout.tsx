@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Voice Inbox – Sprich es aus",
-  description: "Eine lokale Voice-Inbox für Gedanken, Aufgaben und Termine.",
+  title: "Voice Inbox",
+  description: "Lokale Voice-Inbox für Notizen, Aufgaben, Termine und Ideen.",
   manifest: "/manifest.webmanifest",
   icons: { icon: "/favicon.svg" },
 };
