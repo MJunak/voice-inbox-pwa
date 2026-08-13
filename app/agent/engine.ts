@@ -5,7 +5,7 @@
 //   injiziert, sodass die Verdrahtung ohne Worker/Modell-Download testbar ist.
 
 export interface NeedleEngine {
-  run(query: string, toolsJson: string): Promise<string>;
+  run(query: string, toolsJson: string, onToken?: (piece: string) => void): Promise<string>;
 }
 
 export type ProgressCb = (loaded: number, total: number) => void;
@@ -21,7 +21,7 @@ function injected(): NeedleEngine | undefined {
 
 let worker: Worker | null = null;
 let seq = 0;
-const pending = new Map<number, { resolve: (v: string) => void; reject: (e: Error) => void }>();
+const pending = new Map<number, { resolve: (v: string) => void; reject: (e: Error) => void; onToken?: (piece: string) => void }>();
 let progressCb: ProgressCb | null = null;
 
 function getWorker(): Worker {
@@ -31,6 +31,10 @@ function getWorker(): Worker {
       const data = event.data ?? {};
       if (data.type === "progress") {
         progressCb?.(data.loaded, data.total);
+        return;
+      }
+      if (data.type === "token") {
+        pending.get(data.id)?.onToken?.(data.piece as string);
         return;
       }
       const entry = pending.get(data.id);
@@ -47,10 +51,10 @@ function getWorker(): Worker {
   return worker;
 }
 
-function call(type: "load" | "run", payload: Record<string, unknown>): Promise<string> {
+function call(type: "load" | "run", payload: Record<string, unknown>, onToken?: (piece: string) => void): Promise<string> {
   const id = ++seq;
   return new Promise<string>((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    pending.set(id, { resolve, reject, onToken });
     getWorker().postMessage({ id, type, payload });
   });
 }
@@ -63,7 +67,7 @@ export function preloadEngine(onProgress?: ProgressCb): Promise<void> {
 }
 
 const workerEngine: NeedleEngine = {
-  run: (query, tools) => call("run", { query, tools }),
+  run: (query, tools, onToken) => call("run", { query, tools }, onToken),
 };
 
 // Liefert die injizierte Test-Engine, sonst die Worker-Engine (synchron;

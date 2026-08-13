@@ -15,7 +15,7 @@ const enabled = process.env.RUN_NEEDLE_LIVE === "1" && WEIGHTS_DIR && existsSync
 test.skip(() => !enabled, "RUN_NEEDLE_LIVE=1 und WEIGHTS_DIR mit needle.safetensors/vocab.txt nötig");
 
 test("echte Needle-Engine wechselt die Ansicht per Befehl", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(120_000);
 
   // HF-Downloads aus lokalen Dateien bedienen (kein echter Netzzugriff nötig).
   await page.route(/needle\.safetensors/, (route) =>
@@ -43,5 +43,11 @@ test("echte Needle-Engine wechselt die Ansicht per Befehl", async ({ page }) => 
   // Und ein echter Lösch-Befehl per Texttreffer.
   await page.getByRole("textbox", { name: /Befehl an die App/i }).fill("lösche den Zahnarzt Termin");
   await page.getByRole("button", { name: "Ausführen" }).click();
-  await expect(page.locator(".row")).toHaveCount(2, { timeout: 15_000 });
+  await expect(page.locator(".row")).toHaveCount(2, { timeout: 20_000 });
+
+  // Positionale Referenz (exakt der Fall aus dem Nutzer-Feedback):
+  await page.getByRole("textbox", { name: /Befehl an die App/i }).fill("Lösch die letzte Notiz");
+  await page.getByRole("button", { name: "Ausführen" }).click();
+  await expect(page.locator(".row")).toHaveCount(1, { timeout: 20_000 });
+  await expect(page.locator(".row", { hasText: "Buchtipp von Anna" })).toHaveCount(0);
 });

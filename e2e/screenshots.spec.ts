@@ -39,6 +39,19 @@ test("screenshot: Listenansicht", async ({ page }) => {
   await page.screenshot({ path: "e2e/screens/04-list.png", fullPage: true });
 });
 
+test("screenshot: Debug-Panel nach Befehl", async ({ page }) => {
+  await installNeedleMock(page, [
+    { match: "liste", response: '[{"name":"switch_view","arguments":{"view":"list"}}]' },
+  ]);
+  await seedEntries(page, sampleEntries);
+  await page.goto("/");
+  await page.getByRole("textbox", { name: /Befehl an die App/i }).fill("zeig mir die Liste");
+  await page.getByRole("button", { name: "Ausführen" }).click();
+  await page.locator(".row").first().waitFor();
+  await page.getByText("Debug: Inferenz").click();
+  await page.screenshot({ path: "e2e/screens/05-debug.png", fullPage: true });
+});
+
 test("screenshot: Composer mit Text", async ({ page }) => {
   await page.addInitScript(() => localStorage.clear());
   await page.goto("/");

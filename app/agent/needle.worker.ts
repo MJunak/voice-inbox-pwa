@@ -11,7 +11,10 @@ const DEFAULT_VOCAB_URL =
   "https://huggingface.co/Abdalrahman/needle-rs-safetensors/resolve/main/vocab.txt";
 const MODEL_CACHE = "needle-model-v1";
 
-type Engine = { run(query: string, toolsJson: string): string };
+type Engine = {
+  run(query: string, toolsJson: string): string;
+  run_stream(query: string, toolsJson: string, onToken: (id: number, piece: string) => void): string;
+};
 let engine: Engine | null = null;
 let loadPromise: Promise<void> | null = null;
 
@@ -72,12 +75,17 @@ self.onmessage = async (event: MessageEvent) => {
   const { id, type, payload } = event.data ?? {};
   try {
     if (type === "load") {
+      const start = performance.now();
       await ensureLoaded(payload?.weightsUrl, payload?.vocabUrl);
-      (self as unknown as Worker).postMessage({ id, ok: true });
+      (self as unknown as Worker).postMessage({ id, ok: true, ms: performance.now() - start });
     } else if (type === "run") {
       await ensureLoaded(payload?.weightsUrl, payload?.vocabUrl);
-      const result = engine!.run(payload.query, payload.tools);
-      (self as unknown as Worker).postMessage({ id, ok: true, result });
+      const start = performance.now();
+      // Streaming: jedes Token sofort an den Main-Thread melden (Debug-Panel).
+      const result = engine!.run_stream(payload.query, payload.tools, (_tokenId, piece) => {
+        (self as unknown as Worker).postMessage({ type: "token", id, piece });
+      });
+      (self as unknown as Worker).postMessage({ id, ok: true, result, ms: performance.now() - start });
     }
   } catch (error) {
     (self as unknown as Worker).postMessage({ id, ok: false, error: String((error as Error)?.message ?? error) });

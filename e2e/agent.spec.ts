@@ -25,6 +25,10 @@ test.beforeEach(async ({ page }) => {
     { match: "fuzzy liste", response: '[{"name":"switch_view","arguments":{"view":"Liste"}}]' },
     { match: "fuzzy english", response: '[{"name":"switch_view","arguments":{"view":"list view"}}]' },
     { match: "fuzzy task", response: '[{"name":"filter_kind","arguments":{"kind":"tasks"}}]' },
+    // Positional: das Modell reicht "letzte Notiz" als match-Text durch.
+    { match: "letzte notiz", response: '[{"name":"delete_note","arguments":{"match":"letzte Notiz"}}]' },
+    // Doppelter Key mit Parameter-Echo (real beobachtete Modell-Ausgabe).
+    { match: "dupkey", response: '[{"name":"filter_kind","arguments":{"kind":"Termin","kind":"kind"}}]' },
   ]);
 });
 
@@ -101,10 +105,38 @@ test("verarbeitet unsaubere Enum-Ausgaben des Modells (fuzzy)", async ({ page })
   await expect(page.locator(".row").first()).toContainText("Rechnung");
 });
 
+test("Befehl löscht die letzte Notiz (positionale Referenz)", async ({ page }) => {
+  await seedEntries(page, seed);
+  await page.goto("/");
+  await command(page, "Lösch die letzte notiz");
+  await expect(page.locator(".card")).toHaveCount(2);
+  await expect(page.locator(".card", { hasText: "Buchtipp von Anna" })).toHaveCount(0);
+  await expect(page.locator(".notice")).toContainText("Neuester Eintrag gelöscht");
+});
+
+test("übersteht doppelte Argument-Keys (Parameter-Echo)", async ({ page }) => {
+  await seedEntries(page, seed);
+  await page.goto("/");
+  await command(page, "dupkey filter");
+  // Trotz {"kind":"Termin","kind":"kind"} muss der erste Wert gewinnen.
+  await expect(page.locator(".card")).toHaveCount(1);
+  await expect(page.locator(".card").first()).toContainText("Zahnarzt");
+});
+
+test("Debug-Panel zeigt Roh-Ausgabe und Dauer der Inferenz", async ({ page }) => {
+  await seedEntries(page, seed);
+  await page.goto("/");
+  await command(page, "zeig mir die liste");
+  await page.getByText("Debug: Inferenz").click();
+  const panel = page.locator(".debugPanel");
+  await expect(panel.locator("code")).toContainText('"name":"switch_view"');
+  await expect(panel.getByText(/Tokens/)).toBeVisible();
+});
+
 test("unbekannter Befehl meldet, dass nichts erkannt wurde", async ({ page }) => {
   await seedEntries(page, seed);
   await page.goto("/");
   await command(page, "völlig unverständliches kauderwelsch");
-  await expect(page.getByText(/Kein passender Befehl erkannt/i)).toBeVisible();
+  await expect(page.locator(".notice")).toContainText(/Kein passender Befehl erkannt/i);
   await expect(page.locator(".card")).toHaveCount(3);
 });

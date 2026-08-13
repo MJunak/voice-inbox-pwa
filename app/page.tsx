@@ -45,6 +45,7 @@ export default function Home() {
   const [agentStatus, setAgentStatus] = useState("");
   const [modelState, setModelState] = useState<ModelState>("idle");
   const [modelProgress, setModelProgress] = useState(0);
+  const [debug, setDebug] = useState<{ query: string; raw: string; message: string; ms: number; tokens: number } | null>(null);
   const recognitionRef = useRef<Recognition | null>(null);
   const draftRef = useRef("");
   const wantsToListenRef = useRef(false);
@@ -165,6 +166,13 @@ export default function Home() {
       if (count) setEntries((current) => current.filter((entry) => !entry.text.toLowerCase().includes(needle)));
       return count;
     },
+    deleteLatest: (kind) => {
+      // Neuester Eintrag steht vorn (wird beim Anlegen vorangestellt).
+      const target = (kind && entriesRef.current.find((entry) => entry.kind === kind)) ?? entriesRef.current[0];
+      if (!target) return null;
+      setEntries((current) => current.filter((entry) => entry.id !== target.id));
+      return { text: target.text, kind: target.kind };
+    },
     setKindMatching: (match, kind) => {
       const needle = match.toLowerCase();
       const count = entriesRef.current.filter((entry) => entry.text.toLowerCase().includes(needle)).length;
@@ -179,14 +187,22 @@ export default function Home() {
     if (!text || agentBusy) return;
     setAgentBusy(true);
     setAgentStatus(modelState === "ready" ? "Denke nach …" : "Modell wird geladen …");
+    setDebug({ query: text, raw: "", message: "", ms: 0, tokens: 0 });
+    const start = performance.now();
     try {
       const engine = resolveEngine((loadedBytes, total) => setModelProgress(total ? loadedBytes / total : 0));
-      const raw = await engine.run(text, TOOLS_JSON);
+      // Token-Stream live ins Debug-Panel schreiben.
+      const raw = await engine.run(text, TOOLS_JSON, (piece) => {
+        setDebug((d) => d && { ...d, raw: d.raw + piece, tokens: d.tokens + 1, ms: performance.now() - start });
+      });
       const result = runToolCalls(raw, actionApi);
+      setDebug((d) => d && { ...d, raw, message: result.message, ms: performance.now() - start });
       flash(result.message);
       if (result.ok) setCommand("");
     } catch (error) {
-      flash(`Fehler: ${(error as Error).message}`);
+      const message = `Fehler: ${(error as Error).message}`;
+      setDebug((d) => d && { ...d, message, ms: performance.now() - start });
+      flash(message);
     } finally {
       setAgentBusy(false); setAgentStatus("");
     }
@@ -215,6 +231,15 @@ export default function Home() {
         <span className={`cmdModel ${modelState}`} title="Lokales Needle-Modell (WASM, im Browser)" role="status">{agentBusy && agentStatus ? agentStatus : modelLabel}</span>
         <button type="submit" disabled={agentBusy || !command.trim()}>{agentBusy ? <span className="spinner" aria-label="arbeitet" /> : "Ausführen"}</button>
       </form>
+      <details className="debugPanel">
+        <summary>Debug: Inferenz</summary>
+        {debug ? <dl>
+          <dt>Befehl</dt><dd>{debug.query}</dd>
+          <dt>Roh-Ausgabe</dt><dd><code className={agentBusy ? "streaming" : ""}>{debug.raw || (agentBusy ? "…" : "—")}</code></dd>
+          <dt>Ergebnis</dt><dd>{debug.message || (agentBusy ? "läuft …" : "—")}</dd>
+          <dt>Dauer</dt><dd>{(debug.ms / 1000).toFixed(1)} s · {debug.tokens} Tokens{debug.ms > 0 && debug.tokens > 0 ? ` · ${(debug.tokens / (debug.ms / 1000)).toFixed(1)} tok/s` : ""}</dd>
+        </dl> : <p className="debugEmpty">Noch kein Befehl ausgeführt. Die Roh-Ausgabe des Modells erscheint hier live, Token für Token.</p>}
+      </details>
       <div className="toolbar">
         <div className="filters">{(["Alle", "Aufgabe", "Termin", "Notiz", "Idee"] as const).map((item) => <button className={filter === item ? "active" : ""} onClick={() => setFilter(item)} key={item}>{item}{item === "Alle" && <span>{entries.length}</span>}</button>)}</div>
         <div className="viewToggle" role="group" aria-label="Ansicht umschalten">
