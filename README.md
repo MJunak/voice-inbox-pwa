@@ -6,8 +6,11 @@ Eine lokale, installierbare Voice-Inbox für Gedanken, Aufgaben, Termine und Ide
 
 - Spracheingabe über die Web Speech API
 - lokale Kategorisierung ohne Backend
+- Steuerung per natürlicher Sprache über ein lokales LLM
+  (Cactus Needle 2, WASM im Browser) – siehe [docs/needle-agent.md](docs/needle-agent.md)
 - Speicherung ausschließlich im Browser
-- Suche und Filter
+- Suche und Filter, Karten- und Listenansicht
+- JSON-Export/-Import des gesamten Bestands
 - offlinefähige PWA mit Service Worker
 - keine Anmeldung und keine Cloud erforderlich
 
