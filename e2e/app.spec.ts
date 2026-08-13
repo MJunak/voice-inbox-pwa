@@ -26,6 +26,17 @@ test("legt einen getippten Eintrag in der Inbox ab", async ({ page }) => {
   await expect(card.locator(".tag")).toHaveText("Aufgabe");
 });
 
+test("Composer-Mikro nutzt die im Dropdown gewählte Sprache", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("combobox", { name: /Sprache der Spracherkennung/i }).selectOption("es-ES");
+  await page.getByRole("button", { name: /Aufnahme starten/i }).click();
+  const lang = await page.evaluate(() => (window as unknown as { __activeRecognition?: { lang: string } }).__activeRecognition?.lang);
+  expect(lang).toBe("es-ES");
+  // Spanisch diktierter Text landet im Composer und wird abgelegt.
+  await emitSpeech(page, "comprar leche para mañana");
+  await expect(page.getByRole("textbox", { name: /neuen Inbox-Eintrag/i })).toHaveValue(/comprar leche/);
+});
+
 test("erfasst Sprache über den gemockten Speech-Layer", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: /Aufnahme starten/i }).click();
