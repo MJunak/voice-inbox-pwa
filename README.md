@@ -24,6 +24,9 @@ Für einen Produktions-Build:
 pnpm build
 ```
 
+Der Produktions-Build erzeugt die statische PWA in `dist-pages`. Der optionale
+Cloudflare-Worker-Build steht separat über `pnpm build:worker` zur Verfügung.
+
 ## GitHub Pages
 
 Der Workflow `.github/workflows/deploy-pages.yml` baut und veröffentlicht die
@@ -34,7 +37,7 @@ gestartet werden. Im Repository muss unter **Settings → Pages** als Quelle
 Für einen lokalen Pages-Build:
 
 ```bash
-pnpm build:pages
+pnpm build
 ```
 
 Die Spracheingabe funktioniert derzeit am zuverlässigsten in Chrome und Edge. Browser können für ihre Spracherkennung trotz lokal installierter PWA eine Internetverbindung benötigen.

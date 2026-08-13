@@ -35,7 +35,7 @@ jobs:
         id: pages
         uses: actions/configure-pages@v5
       - name: Build static site
-        run: pnpm build:pages
+        run: pnpm build
         env:
           PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}/
       - name: Upload Pages artifact
