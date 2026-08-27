@@ -6,7 +6,8 @@ import { resolveEngine, preloadEngine } from "./agent/engine";
 type ModelState = "idle" | "loading" | "ready" | "error";
 
 type Kind = "Aufgabe" | "Termin" | "Notiz" | "Idee";
-type Entry = { id: string; kind: Kind; text: string; created: string };
+type Entry = { id: string; kind: Kind; text: string; created: string; updatedAt: string; deletedAt?: string };
+type SyncConfig = { url: string; token: string };
 type View = "cards" | "list";
 type SpeechResult = { isFinal: boolean; 0: { transcript: string } };
 type Recognition = { lang: string; continuous: boolean; interimResults: boolean; onresult: ((event: { results: ArrayLike<SpeechResult> }) => void) | null; onend: (() => void) | null; start: () => void; stop: () => void };
@@ -32,8 +33,18 @@ function readStoredEntries(): Entry[] {
     const stored = localStorage.getItem("voice-inbox-entries");
     if (!stored) return [];
     const parsed = JSON.parse(stored) as Array<Entry & { title?: string; detail?: string }>;
-    return parsed.map(({ id, kind, text, title, detail, created }) => ({ id, kind, text: text ?? [title, detail && !detail.startsWith("Automatisch lokal erkannt") ? detail : ""].filter(Boolean).join("\n"), created }));
+    const migratedAt = new Date().toISOString();
+    return parsed.map(({ id, kind, text, title, detail, created, updatedAt, deletedAt }) => ({ id, kind, text: text ?? [title, detail && !detail.startsWith("Automatisch lokal erkannt") ? detail : ""].filter(Boolean).join("\n"), created, updatedAt: updatedAt ?? migratedAt, deletedAt }));
   } catch { return []; }
+}
+
+function mergeEntries(local: Entry[], remote: Entry[]) {
+  const merged = new Map<string, Entry>();
+  [...local, ...remote].forEach((entry) => {
+    const current = merged.get(entry.id);
+    if (!current || entry.updatedAt > current.updatedAt) merged.set(entry.id, entry);
+  });
+  return [...merged.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 export default function Home() {
@@ -57,6 +68,9 @@ export default function Home() {
   const speechLangRef = useRef<SpeechLang>("de-DE");
   const [debug, setDebug] = useState<{ query: string; raw: string; message: string; ms: number; path: string; confidence?: number; reasoning?: string } | null>(null);
   const [pending, setPending] = useState<{ calls: ToolCall[]; confidence?: number } | null>(null);
+  const [syncConfig, setSyncConfig] = useState<SyncConfig>({ url: "", token: "" });
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncState, setSyncState] = useState<"local" | "syncing" | "synced" | "error">("local");
   const recognitionRef = useRef<Recognition | null>(null);
   const draftRef = useRef("");
   const wantsToListenRef = useRef(false);
@@ -68,6 +82,7 @@ export default function Home() {
     const loadTimer = window.setTimeout(() => {
       const storedLang = localStorage.getItem("voice-inbox-lang") as SpeechLang | null;
       if (storedLang && SPEECH_LANGS.some((l) => l.value === storedLang)) { setSpeechLang(storedLang); speechLangRef.current = storedLang; }
+      try { setSyncConfig(JSON.parse(localStorage.getItem("voice-inbox-sync") ?? '{"url":"","token":""}')); } catch { /* lokale Fehlkonfiguration ignorieren */ }
       setEntries(readStoredEntries()); setLoaded(true);
     }, 0);
     if ("serviceWorker" in navigator) navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`);
@@ -90,7 +105,30 @@ export default function Home() {
     return () => { cancelled = true; window.clearTimeout(idle); };
   }, []);
 
-  const visible = useMemo(() => entries.filter((entry) => (filter === "Alle" || entry.kind === filter) && entry.text.toLowerCase().includes(query.toLowerCase())), [entries, filter, query]);
+  const activeEntries = useMemo(() => entries.filter((entry) => !entry.deletedAt), [entries]);
+  const visible = useMemo(() => activeEntries.filter((entry) => (filter === "Alle" || entry.kind === filter) && entry.text.toLowerCase().includes(query.toLowerCase())), [activeEntries, filter, query]);
+
+  async function synchronize(config = syncConfig) {
+    if (!config.url || !config.token) { setSyncOpen(true); return; }
+    setSyncState("syncing");
+    try {
+      const endpoint = `${config.url.replace(/\/$/, "")}/v1/entries`;
+      const headers = { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" };
+      const response = await fetch(endpoint, { headers });
+      if (!response.ok) throw new Error("Abruf fehlgeschlagen");
+      const remote = await response.json() as { entries: Entry[] };
+      const merged = mergeEntries(entriesRef.current, remote.entries ?? []);
+      const saved = await fetch(endpoint, { method: "PUT", headers, body: JSON.stringify({ entries: merged }) });
+      if (!saved.ok) throw new Error("Speichern fehlgeschlagen");
+      setEntries(merged); setSyncState("synced"); flash("Mit VPS synchronisiert");
+    } catch { setSyncState("error"); flash("VPS-Synchronisierung fehlgeschlagen"); }
+  }
+
+  function saveSyncConfig() {
+    const config = { ...syncConfig, url: syncConfig.url.trim().replace(/\/$/, "") };
+    setSyncConfig(config); localStorage.setItem("voice-inbox-sync", JSON.stringify(config));
+    setSyncOpen(false); void synchronize(config);
+  }
 
   function beginRecognition(RecognitionApi: RecognitionConstructor, baseText: string) {
     const recognition = new RecognitionApi();
@@ -124,15 +162,16 @@ export default function Home() {
     const text = draft.trim(); if (!text) return;
     wantsToListenRef.current = false; recognitionRef.current?.stop();
     // Eingabe nach dem Ablegen leeren, damit sofort ein neuer Eintrag begonnen werden kann.
-    setEntries((current) => [{ id: crypto.randomUUID(), kind: classify(text), text, created: "Gerade eben" }, ...current]);
+    setEntries((current) => [{ id: crypto.randomUUID(), kind: classify(text), text, created: "Gerade eben", updatedAt: new Date().toISOString() }, ...current]);
     draftRef.current = ""; setDraft("");
   }
   function deleteEntry(id: string) {
-    setEntries((current) => current.filter((item) => item.id !== id));
+    const stamp = new Date().toISOString();
+    setEntries((current) => current.map((item) => item.id === id ? { ...item, deletedAt: stamp, updatedAt: stamp } : item));
   }
   // Tag manuell umschalten: zyklisch durch die Kinds.
   function cycleKind(id: string) {
-    setEntries((current) => current.map((item) => item.id === id ? { ...item, kind: KINDS[(KINDS.indexOf(item.kind) + 1) % KINDS.length] } : item));
+    setEntries((current) => current.map((item) => item.id === id ? { ...item, kind: KINDS[(KINDS.indexOf(item.kind) + 1) % KINDS.length], updatedAt: new Date().toISOString() } : item));
   }
   async function copyEntry(entry: Entry) {
     try {
@@ -146,12 +185,12 @@ export default function Home() {
     window.setTimeout(() => setNotice((current) => (current === message ? "" : current)), 2500);
   }
   function exportJson() {
-    const blob = new Blob([JSON.stringify(entries, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify(activeEntries, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url; link.download = "voice-inbox-export.json"; link.click();
     URL.revokeObjectURL(url);
-    flash(`${entries.length} Einträge exportiert`);
+    flash(`${activeEntries.length} Einträge exportiert`);
   }
   function importJson(file: File) {
     const reader = new FileReader();
@@ -159,9 +198,10 @@ export default function Home() {
       try {
         const parsed = JSON.parse(String(reader.result)) as Entry[];
         if (!Array.isArray(parsed)) throw new Error("kein Array");
+        const importedAt = new Date().toISOString();
         const cleaned = parsed
           .filter((item) => item && typeof item.text === "string")
-          .map((item) => ({ id: item.id ?? crypto.randomUUID(), kind: KINDS.includes(item.kind) ? item.kind : classify(item.text), text: item.text, created: item.created ?? "Importiert" }));
+          .map((item) => ({ id: item.id ?? crypto.randomUUID(), kind: KINDS.includes(item.kind) ? item.kind : classify(item.text), text: item.text, created: item.created ?? "Importiert", updatedAt: item.updatedAt ?? importedAt }));
         setEntries(cleaned);
         flash(`${cleaned.length} Einträge importiert`);
       } catch { flash("Import fehlgeschlagen: ungültige JSON-Datei"); }
@@ -175,24 +215,24 @@ export default function Home() {
     setView,
     setFilter,
     setQuery,
-    addEntry: (text) => setEntries((current) => [{ id: crypto.randomUUID(), kind: classify(text), text, created: "Gerade eben" }, ...current]),
+    addEntry: (text) => setEntries((current) => [{ id: crypto.randomUUID(), kind: classify(text), text, created: "Gerade eben", updatedAt: new Date().toISOString() }, ...current]),
     deleteMatching: (match) => {
       const needle = match.toLowerCase();
-      const count = entriesRef.current.filter((entry) => entry.text.toLowerCase().includes(needle)).length;
-      if (count) setEntries((current) => current.filter((entry) => !entry.text.toLowerCase().includes(needle)));
+      const count = entriesRef.current.filter((entry) => !entry.deletedAt && entry.text.toLowerCase().includes(needle)).length;
+      if (count) { const stamp = new Date().toISOString(); setEntries((current) => current.map((entry) => !entry.deletedAt && entry.text.toLowerCase().includes(needle) ? { ...entry, deletedAt: stamp, updatedAt: stamp } : entry)); }
       return count;
     },
     deleteLatest: (kind) => {
       // Neuester Eintrag steht vorn (wird beim Anlegen vorangestellt).
-      const target = (kind && entriesRef.current.find((entry) => entry.kind === kind)) ?? entriesRef.current[0];
+      const target = (kind && entriesRef.current.find((entry) => !entry.deletedAt && entry.kind === kind)) ?? entriesRef.current.find((entry) => !entry.deletedAt);
       if (!target) return null;
-      setEntries((current) => current.filter((entry) => entry.id !== target.id));
+      const stamp = new Date().toISOString(); setEntries((current) => current.map((entry) => entry.id === target.id ? { ...entry, deletedAt: stamp, updatedAt: stamp } : entry));
       return { text: target.text, kind: target.kind };
     },
     setKindMatching: (match, kind) => {
       const needle = match.toLowerCase();
-      const count = entriesRef.current.filter((entry) => entry.text.toLowerCase().includes(needle)).length;
-      if (count) setEntries((current) => current.map((entry) => (entry.text.toLowerCase().includes(needle) ? { ...entry, kind } : entry)));
+      const count = entriesRef.current.filter((entry) => !entry.deletedAt && entry.text.toLowerCase().includes(needle)).length;
+      if (count) setEntries((current) => current.map((entry) => (!entry.deletedAt && entry.text.toLowerCase().includes(needle) ? { ...entry, kind, updatedAt: new Date().toISOString() } : entry)));
       return count;
     },
     exportJson,
@@ -290,7 +330,7 @@ export default function Home() {
   }
 
   return <main>
-    <header className="topbar"><a className="brand" href="./"><span className="logo">V</span><span>Voice Inbox</span></a><div className="topbarRight"><select className="langSelect" value={speechLang} onChange={(event) => changeSpeechLang(event.target.value as SpeechLang)} aria-label="Sprache der Spracherkennung" title="Sprache der Spracherkennung">{SPEECH_LANGS.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}</select><a className="inboxLink" href="#inbox">Inbox <b>{entries.length}</b></a></div></header>
+    <header className="topbar"><a className="brand" href="./"><span className="logo">V</span><span>Voice Inbox</span></a><div className="topbarRight"><button className={`syncButton ${syncState}`} onClick={() => syncConfig.url ? void synchronize() : setSyncOpen(true)}><span />{syncState === "syncing" ? "Sync …" : syncState === "synced" ? "VPS aktuell" : syncState === "error" ? "Sync-Fehler" : syncConfig.url ? "VPS Sync" : "Sync einrichten"}</button><select className="langSelect" value={speechLang} onChange={(event) => changeSpeechLang(event.target.value as SpeechLang)} aria-label="Sprache der Spracherkennung" title="Sprache der Spracherkennung">{SPEECH_LANGS.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}</select><a className="inboxLink" href="#inbox">Inbox <b>{activeEntries.length}</b></a></div></header>
     <section className="hero">
       <div className={`composer ${listening ? "isListening" : ""}`}>
         <div className="composerHead"><div><strong>Neuer Eintrag</strong><span>{listening ? "Aufnahme läuft – sprich einfach weiter" : "Aufnehmen oder direkt losschreiben"}</span></div><button className="mic" onClick={toggleListening} aria-label={listening ? "Aufnahme stoppen" : "Aufnahme starten"} title={`Spracherkennung: ${speechLang} – umschaltbar oben rechts`}><span>{listening ? "■" : "●"}</span>{listening ? "Stoppen" : "Aufnehmen"}<em>{SPEECH_LANGS.find((l) => l.value === speechLang)?.label}</em></button></div>
@@ -299,7 +339,7 @@ export default function Home() {
       </div>
     </section>
     <section className="inbox" id="inbox">
-      <div className="sectionHead"><div><h2>Inbox</h2><p>{entries.length} Einträge gespeichert.</p></div><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="⌕  Durchsuchen …" aria-label="Inbox durchsuchen" /></div>
+      <div className="sectionHead"><div><h2>Inbox</h2><p>{activeEntries.length} Einträge gespeichert.</p></div><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="⌕  Durchsuchen …" aria-label="Inbox durchsuchen" /></div>
       <form className="commandBar" onSubmit={(event) => { event.preventDefault(); runCommand(); }}>
         <span className="cmdIcon" aria-hidden="true">⌘</span>
         <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder={cmdListening ? "Sprich deinen Befehl …" : "Befehl … z. B. „zeig mir die Liste“ oder „lösche den Zahnarzt-Termin“"} aria-label="Befehl an die App (Needle)" />
@@ -331,7 +371,7 @@ export default function Home() {
         </dl> : <p className="debugEmpty">Noch kein Befehl ausgeführt. Hier erscheinen Roh-Ausgabe, Reasoning und Confidence des Modells.</p>}
       </details>
       <div className="toolbar">
-        <div className="filters">{(["Alle", "Aufgabe", "Termin", "Notiz", "Idee"] as const).map((item) => <button className={filter === item ? "active" : ""} onClick={() => setFilter(item)} key={item}>{item}{item === "Alle" && <span>{entries.length}</span>}</button>)}</div>
+        <div className="filters">{(["Alle", "Aufgabe", "Termin", "Notiz", "Idee"] as const).map((item) => <button className={filter === item ? "active" : ""} onClick={() => setFilter(item)} key={item}>{item}{item === "Alle" && <span>{activeEntries.length}</span>}</button>)}</div>
         <div className="viewToggle" role="group" aria-label="Ansicht umschalten">
           <button className={view === "cards" ? "active" : ""} onClick={() => setView("cards")} aria-pressed={view === "cards"} aria-label="Kartenansicht">▦ Karten</button>
           <button className={view === "list" ? "active" : ""} onClick={() => setView("list")} aria-pressed={view === "list"} aria-label="Listenansicht">☰ Liste</button>
@@ -357,11 +397,12 @@ export default function Home() {
             <button className="ghost" onClick={() => deleteEntry(entry.id)} aria-label="Löschen">×</button>
           </div>)}{visible.length === 0 && <div className="empty">Noch keine Einträge.</div>}</div>}
       <div className="dataBar">
-        <button onClick={exportJson} disabled={entries.length === 0}>Export als JSON</button>
+        <button onClick={exportJson} disabled={activeEntries.length === 0}>Export als JSON</button>
         <button onClick={() => fileInputRef.current?.click()}>Import aus JSON</button>
         <input ref={fileInputRef} type="file" accept="application/json,.json" hidden aria-label="JSON-Datei importieren" onChange={(event) => { const file = event.target.files?.[0]; if (file) importJson(file); event.target.value = ""; }} />
         {notice && <span className="notice" role="status">{notice}</span>}
       </div>
     </section>
+    {syncOpen && <div className="modalBackdrop" onClick={() => setSyncOpen(false)}><section className="syncModal" onClick={(event) => event.stopPropagation()}><button className="modalClose" onClick={() => setSyncOpen(false)}>×</button><span className="tag green">Eigener Server</span><h2>VPS-Synchronisierung</h2><p>URL und Token werden nur lokal in diesem Browser gespeichert. Die Einträge gehen ausschließlich an deinen VPS.</p><label>API-Adresse<input type="url" placeholder="https://strato-vpc.…ts.net:8443" value={syncConfig.url} onChange={(event) => setSyncConfig({ ...syncConfig, url: event.target.value })}/></label><label>Zugangs-Token<input type="password" placeholder="Token vom VPS" value={syncConfig.token} onChange={(event) => setSyncConfig({ ...syncConfig, token: event.target.value })}/></label><button className="saveSync" onClick={saveSyncConfig}>Speichern & synchronisieren</button></section></div>}
   </main>;
 }

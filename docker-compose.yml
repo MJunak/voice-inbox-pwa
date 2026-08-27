@@ -1,0 +1,13 @@
+services:
+  voice-inbox-api:
+    build: ./server
+    restart: unless-stopped
+    environment:
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN in .env}
+      ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-*}
+    volumes:
+      - voice-inbox-data:/data
+    ports:
+      - "127.0.0.1:8787:8080"
+volumes:
+  voice-inbox-data:
