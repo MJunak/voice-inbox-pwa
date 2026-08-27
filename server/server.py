@@ -6,7 +6,7 @@ def db():
  c=sqlite3.connect(DB_PATH); c.execute("CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)"); return c
 class Handler(BaseHTTPRequestHandler):
  def reply(self,status=200):
-  self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8"); self.send_header("Access-Control-Allow-Origin",ALLOWED_ORIGIN); self.send_header("Access-Control-Allow-Headers","Authorization, Content-Type"); self.send_header("Access-Control-Allow-Methods","GET, PUT, OPTIONS"); self.end_headers()
+  self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8"); self.send_header("Access-Control-Allow-Origin",ALLOWED_ORIGIN); self.send_header("Access-Control-Allow-Headers","Authorization, Content-Type"); self.send_header("Access-Control-Allow-Methods","GET, PUT, OPTIONS"); self.send_header("Access-Control-Allow-Private-Network","true"); self.send_header("Access-Control-Max-Age","600"); self.send_header("Vary","Origin, Access-Control-Request-Private-Network"); self.end_headers()
  def auth(self): return API_TOKEN and self.headers.get("Authorization")==f"Bearer {API_TOKEN}"
  def do_OPTIONS(self): self.reply(204)
  def do_GET(self):
