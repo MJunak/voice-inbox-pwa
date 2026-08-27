@@ -14,6 +14,15 @@ Eine lokale, installierbare Voice-Inbox für Gedanken, Aufgaben, Termine und Ide
 - offlinefähige PWA mit Service Worker
 - keine Anmeldung und keine Cloud erforderlich
 
+## Wohin es geht
+
+- [docs/roadmap.md](docs/roadmap.md) – geplante Features und ihre Reihenfolge
+- [docs/sync.md](docs/sync.md) – Konzept für Sync zwischen Geräten über einen
+  eigenen Server auf dem Homeserver
+- [docs/assistant.md](docs/assistant.md) – Konzept für den Assistenten: ein
+  großes Modell räumt den Bestand auf, priorisiert und erzeugt Einträge aus
+  eingefügtem Text
+
 ## Entwicklung
 
 ```bash
