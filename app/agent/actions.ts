@@ -19,6 +19,9 @@ export type ActionApi = {
   // Fallback auf den neuesten insgesamt). Liefert den gelöschten Eintrag.
   deleteLatest: (kind: Kind | null) => { text: string; kind: Kind } | null;
   setKindMatching: (match: string, kind: Kind) => number;
+  // Markiert passende offene Einträge als erledigt; liefert die Anzahl.
+  completeMatching: (match: string) => number;
+  completeLatest: (kind: Kind | null) => { text: string; kind: Kind } | null;
   exportJson: () => void;
 };
 
@@ -39,6 +42,7 @@ export const TOOLS = [
   { name: "add_note", description: "Add a new note", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
   { name: "delete_note", description: "Delete notes matching text, or the latest note", parameters: { type: "object", properties: { match: { type: "string" } }, required: ["match"] } },
   { name: "set_kind", description: "Change category of notes matching text", parameters: { type: "object", properties: { match: { type: "string" }, kind: { type: "string", enum: KINDS } }, required: ["match", "kind"] } },
+  { name: "complete_note", description: "Mark notes matching text as done, or the latest note", parameters: { type: "object", properties: { match: { type: "string" } }, required: ["match"] } },
   { name: "export_data", description: "Export notes as JSON", parameters: { type: "object", properties: {}, required: [] } },
 ] as const;
 
@@ -52,6 +56,16 @@ export const TOOLS_JSON = JSON.stringify(TOOLS);
 // (JS-\b ist ASCII-basiert), daher dort ohne Wortgrenze matchen.
 const DELETE_WORDS = /\b(lösch\w*|delete|entfern\w*|remove|weg|borra\w*|elimina\w*|quita\w*)\b/i;
 const LATEST_WORDS = /\b(letzte[nrs]?|neueste[nrs]?|latest|last|newest)\b|jüngste|últim[oa]s?|ultim[oa]s?|reciente/i;
+
+const DONE_PATTERNS = [
+  /^erledige\s+(.+)$/i,
+  /^hake?\s+(.+?)\s+ab$/i,
+  /^(.+?)\s+(?:ist\s+|sind\s+)?(?:erledigt|abhaken|abgehakt)$/i,
+  /^mark\s+(.+?)\s+(?:as\s+)?(?:done|completed?)$/i,
+  /^complete\s+(.+)$/i,
+  /^(?:completa|termina)\s+(.+)$/i,
+  /^marca\s+(.+?)\s+como\s+(?:hech[oa]|terminad[oa]|completad[oa])$/i,
+];
 
 // Eindeutige Befehle direkt in Tool-Calls übersetzen – 0 ms, ohne Modell.
 // Konservativ: nur matchen, wenn die Absicht nicht mehrdeutig ist.
@@ -69,6 +83,14 @@ export function tryFastPath(query: string): ToolCall[] | null {
     return [{ name: "clear_search", arguments: {} }];
   }
   if (destructive) return null; // andere Löschbefehle brauchen das Modell
+
+  // Erledigen: "erledige X", "hake X ab", "X ist erledigt", "mark X as done",
+  // "complete X", "completa X", "marca X como hecha"
+  const doneMatch = DONE_PATTERNS.map((pattern) => query.trim().match(pattern)).find(Boolean);
+  if (doneMatch) {
+    const match = doneMatch[1].trim().replace(/^(?:die|den|das|der|the|el|la|los|las)\s+/i, "").replace(/^["„»]|["“«]$/g, "");
+    if (match) return [{ name: "complete_note", arguments: { match } }];
+  }
 
   // Ansicht
   const VIEW_VERBS = /\b(zeig|wechsel|schalt|switch|show|ansicht|muestra|cambia|pon|ver|vista|enséñame|ensename)\b/;
@@ -224,6 +246,14 @@ export function describeToolCall(call: ToolCall): string {
     }
     case "set_kind":
       return `Kategorie auf ${resolveKind(args.kind) ?? "?"} setzen für Einträge mit „${asString(args.match)}“`;
+    case "complete_note": {
+      const match = asString(args.match).trim();
+      if (POSITIONAL.test(match)) {
+        const kind = resolveKind(match.replace(POSITIONAL, ""));
+        return `Neuesten Eintrag als erledigt markieren${kind ? ` (${kind})` : ""}`;
+      }
+      return `Einträge mit „${match}“ als erledigt markieren`;
+    }
     case "export_data":
       return "Alle Einträge als JSON exportieren";
     default:
@@ -283,6 +313,20 @@ export function executeToolCall(call: ToolCall, api: ActionApi): ExecResult {
       return count > 0
         ? { ok: true, message: `${count} Eintrag/Einträge → ${kind}` }
         : { ok: false, message: `Nichts gefunden für „${match}“` };
+    }
+    case "complete_note": {
+      const match = asString(args.match).trim();
+      if (!match) return { ok: false, message: "Kein Suchtext zum Erledigen" };
+      if (POSITIONAL.test(match)) {
+        const done = api.completeLatest(resolveKind(match.replace(POSITIONAL, "")));
+        return done
+          ? { ok: true, message: `Erledigt: „${done.text.slice(0, 40)}${done.text.length > 40 ? "…" : ""}“` }
+          : { ok: false, message: "Nichts Offenes gefunden" };
+      }
+      const count = api.completeMatching(match);
+      return count > 0
+        ? { ok: true, message: `${count} Eintrag/Einträge erledigt` }
+        : { ok: false, message: `Nichts Offenes gefunden für „${match}“` };
     }
     case "export_data": {
       api.exportJson();

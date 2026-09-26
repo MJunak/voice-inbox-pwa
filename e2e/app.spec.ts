@@ -137,7 +137,7 @@ test("exportiert und importiert den State als JSON", async ({ page }) => {
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toBe("voice-inbox-export.json");
 
-  // Import einer bekannten Datei ersetzt den State.
+  // Import einer bekannten Datei ergänzt den Bestand (Merge über id).
   const payload = [
     { id: "imp-1", kind: "Idee", text: "Importierte Idee", created: "Importiert" },
     { id: "imp-2", kind: "Aufgabe", text: "Importierte Aufgabe", created: "Importiert" },
@@ -147,6 +147,114 @@ test("exportiert und importiert den State als JSON", async ({ page }) => {
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify(payload)),
   });
-  await expect(page.locator(".card")).toHaveCount(2);
+  await expect(page.locator(".card")).toHaveCount(3);
   await expect(page.locator(".card").first()).toContainText("Importierte Idee");
+  await expect(page.locator(".card", { hasText: "Export-Testeintrag" })).toHaveCount(1);
+
+  // Erneuter Import derselben Datei dupliziert nichts.
+  await page.locator('input[type=file]').setInputFiles({
+    name: "import.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(payload)),
+  });
+  await expect(page.locator(".card")).toHaveCount(3);
+});
+
+test("hakt Einträge ab und filtert nach Status", async ({ page }) => {
+  await page.goto("/");
+  const textarea = page.getByRole("textbox", { name: /neuen Inbox-Eintrag/i });
+  await textarea.fill("Blumen gießen");
+  await page.getByRole("button", { name: /In Inbox ablegen/i }).click();
+  await textarea.fill("Buch zurückgeben");
+  await page.getByRole("button", { name: /In Inbox ablegen/i }).click();
+
+  await page.locator(".card", { hasText: "Blumen" }).getByRole("button", { name: "Als erledigt markieren" }).click();
+  // Standardansicht "Offen" blendet Erledigtes aus.
+  await expect(page.locator(".card")).toHaveCount(1);
+  await expect(page.locator(".card").first()).toContainText("Buch");
+
+  await page.getByRole("button", { name: /^Erledigt/ }).click();
+  await expect(page.locator(".card")).toHaveCount(1);
+  await expect(page.locator(".card.isDone")).toContainText("Blumen");
+
+  await page.getByRole("button", { name: "Gesamt" }).click();
+  await expect(page.locator(".card")).toHaveCount(2);
+  // Erledigte stehen unten; wieder öffnen geht per Klick.
+  await expect(page.locator(".card").last()).toContainText("Blumen");
+  await page.locator(".card", { hasText: "Blumen" }).getByRole("button", { name: "Wieder öffnen" }).click();
+  await expect(page.locator(".card.isDone")).toHaveCount(0);
+});
+
+test("erkennt Fälligkeiten im Text und sortiert sie nach oben", async ({ page }) => {
+  await page.goto("/");
+  const textarea = page.getByRole("textbox", { name: /neuen Inbox-Eintrag/i });
+  await textarea.fill("Termin morgen um 15 Uhr beim Zahnarzt");
+  await page.getByRole("button", { name: /In Inbox ablegen/i }).click();
+  await textarea.fill("Idee ohne Datum");
+  await page.getByRole("button", { name: /In Inbox ablegen/i }).click();
+
+  const first = page.locator(".card").first();
+  await expect(first).toContainText("Zahnarzt");
+  await expect(first.locator(".due")).toHaveText("◷ Morgen, 15:00");
+
+  // Wiedervorlage um einen Tag
+  await first.locator(".due").click();
+  await first.getByRole("button", { name: "+1 Tag" }).click();
+  await expect(first.locator(".due")).toHaveText("◷ Übermorgen, 15:00");
+});
+
+test("bearbeitet den Text eines Eintrags", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("textbox", { name: /neuen Inbox-Eintrag/i }).fill("Tippfeler im Text");
+  await page.getByRole("button", { name: /In Inbox ablegen/i }).click();
+  await page.locator(".card").getByRole("button", { name: "Bearbeiten" }).click();
+  await page.getByRole("textbox", { name: "Eintrag bearbeiten" }).fill("Tippfehler korrigiert");
+  await page.getByRole("button", { name: "Speichern" }).click();
+  await expect(page.locator(".card .entryText")).toHaveText("Tippfehler korrigiert");
+});
+
+test("exportiert als Markdown", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("textbox", { name: /neuen Inbox-Eintrag/i }).fill("Ich muss die Steuer machen");
+  await page.getByRole("button", { name: /In Inbox ablegen/i }).click();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export als Markdown" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("voice-inbox.md");
+  const content = await (await import("node:fs/promises")).readFile(await download.path(), "utf8");
+  expect(content).toContain("## Aufgabe");
+  expect(content).toContain("- [ ] Ich muss die Steuer machen");
+});
+
+test("übernimmt geteilten Text (Share Target per POST) in den Composer", async ({ page }) => {
+  await page.goto("/");
+  // Warten, bis der Service Worker die Seite kontrolliert.
+  await page.waitForFunction(() => !!navigator.serviceWorker?.controller, null, { timeout: 15_000 }).catch(async () => { await page.reload(); await page.waitForFunction(() => !!navigator.serviceWorker?.controller); });
+  const finalUrl = await page.evaluate(async () => {
+    const form = new FormData();
+    form.set("title", "Artikel"); form.set("text", "Unbedingt lesen"); form.set("url", "https://example.com");
+    const response = await fetch("share-target", { method: "POST", body: form });
+    return response.url;
+  });
+  // Der geteilte Inhalt steht nie in der URL.
+  expect(new URL(finalUrl).search).toBe("");
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: /neuen Inbox-Eintrag/i })).toHaveValue("Artikel\nUnbedingt lesen\nhttps://example.com");
+  // Einmalig: nach erneutem Laden ist der Composer wieder leer.
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: /neuen Inbox-Eintrag/i })).toHaveValue("");
+});
+
+test("migriert alte Einträge ohne Zeitstempel und legt ein Backup an", async ({ page }) => {
+  await page.addInitScript(() => {
+    if (!sessionStorage.getItem("seeded")) {
+      sessionStorage.setItem("seeded", "1");
+      localStorage.setItem("voice-inbox-entries", JSON.stringify([{ id: "old-1", kind: "Notiz", text: "Alter Eintrag", created: "Gerade eben" }]));
+    }
+  });
+  await page.goto("/");
+  await expect(page.locator(".card")).toContainText("Alter Eintrag");
+  const stored = await page.evaluate(() => ({ entries: JSON.parse(localStorage.getItem("voice-inbox-entries") ?? "[]"), backup: localStorage.getItem("voice-inbox-entries-v1-backup") }));
+  expect(stored.entries[0].createdAt).toMatch(/^\d{4}-/);
+  expect(stored.backup).toContain("Alter Eintrag");
 });

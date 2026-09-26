@@ -254,3 +254,13 @@ test("unbekannter Befehl meldet, dass nichts erkannt wurde", async ({ page }) =>
   await expect(page.locator(".notice")).toContainText(/Kein passender Befehl erkannt/i);
   await expect(page.locator(".card")).toHaveCount(3);
 });
+
+test("erledigt einen Eintrag per Befehl (Fast-Path)", async ({ page }) => {
+  await seedEntries(page, seed);
+  await page.goto("/");
+  await command(page, "erledige Rechnung");
+  await expect(page.locator(".notice")).toContainText("1 Eintrag/Einträge erledigt");
+  await expect(page.locator(".card", { hasText: "Rechnung" })).toHaveCount(0);
+  await page.getByRole("button", { name: /^Erledigt/ }).click();
+  await expect(page.locator(".card.isDone")).toContainText("Rechnung");
+});

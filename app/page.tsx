@@ -2,18 +2,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { TOOLS_JSON, tryFastPath, executeToolCall, parseToolCalls, parseModelInfo, describeToolCall, type ActionApi, type ToolCall } from "./agent/actions";
 import { resolveEngine, preloadEngine } from "./agent/engine";
+import { KINDS, createEntry, dueState, dueToInput, formatCreated, formatDue, inputToDue, latestEntry, mergeEntries, normalizeEntries, parseDue, purgeTombstones, snoozeDue, sortForDisplay, toMarkdown, type Entry, type Kind } from "./inbox/model";
 
 type ModelState = "idle" | "loading" | "ready" | "error";
 
-type Kind = "Aufgabe" | "Termin" | "Notiz" | "Idee";
-type Entry = { id: string; kind: Kind; text: string; created: string; updatedAt: string; deletedAt?: string };
 type SyncConfig = { url: string; token: string };
 type View = "cards" | "list";
+type Status = "Offen" | "Erledigt" | "Gesamt";
 type SpeechResult = { isFinal: boolean; 0: { transcript: string } };
 type Recognition = { lang: string; continuous: boolean; interimResults: boolean; onresult: ((event: { results: ArrayLike<SpeechResult> }) => void) | null; onend: (() => void) | null; start: () => void; stop: () => void };
 type RecognitionConstructor = new () => Recognition;
 
-const KINDS: Kind[] = ["Aufgabe", "Termin", "Notiz", "Idee"];
 const colors: Record<Kind, string> = { Aufgabe: "blue", Termin: "orange", Notiz: "violet", Idee: "green" };
 type SpeechLang = "de-DE" | "es-ES" | "en-US";
 const SPEECH_LANGS: Array<{ value: SpeechLang; label: string }> = [
@@ -21,30 +20,39 @@ const SPEECH_LANGS: Array<{ value: SpeechLang; label: string }> = [
   { value: "es-ES", label: "ES" },
   { value: "en-US", label: "EN" },
 ];
-function classify(text: string): Kind {
-  const value = text.toLowerCase();
-  if (/morgen|uhr|termin|treffen|montag|dienstag|mittwoch|donnerstag|freitag|cita|reunión|reunion|mañana|lunes|martes|miércoles|miercoles|jueves|viernes/.test(value)) return "Termin";
-  if (/muss|erledigen|machen|aufgabe|todo|erinner|tengo que|tarea|pagar/.test(value)) return "Aufgabe";
-  if (/idee|vielleicht|könnte|vorschlag|idea|quizás|quizas|podría|podria/.test(value)) return "Idee";
-  return "Notiz";
-}
+const STORAGE_KEY = "voice-inbox-entries";
+
+// Lädt den Bestand und migriert ältere Formate. Vor der ersten Migration eines
+// v1-Bestands (ohne createdAt) bleibt eine Sicherungskopie liegen.
 function readStoredEntries(): Entry[] {
   try {
-    const stored = localStorage.getItem("voice-inbox-entries");
+    const stored = localStorage.getItem(STORAGE_KEY);
     if (!stored) return [];
-    const parsed = JSON.parse(stored) as Array<Entry & { title?: string; detail?: string }>;
-    const migratedAt = new Date().toISOString();
-    return parsed.map(({ id, kind, text, title, detail, created, updatedAt, deletedAt }) => ({ id, kind, text: text ?? [title, detail && !detail.startsWith("Automatisch lokal erkannt") ? detail : ""].filter(Boolean).join("\n"), created, updatedAt: updatedAt ?? migratedAt, deletedAt }));
+    const parsed = JSON.parse(stored) as unknown;
+    if (Array.isArray(parsed) && parsed.some((item) => item && typeof item === "object" && !("createdAt" in item)) && !localStorage.getItem(`${STORAGE_KEY}-v1-backup`)) {
+      localStorage.setItem(`${STORAGE_KEY}-v1-backup`, stored);
+    }
+    return purgeTombstones(normalizeEntries(parsed));
   } catch { return []; }
 }
 
-function mergeEntries(local: Entry[], remote: Entry[]) {
-  const merged = new Map<string, Entry>();
-  [...local, ...remote].forEach((entry) => {
-    const current = merged.get(entry.id);
-    if (!current || entry.updatedAt > current.updatedAt) merged.set(entry.id, entry);
-  });
-  return [...merged.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+// Kurzer Fingerabdruck des Bestands, um unnötige Auto-Syncs zu vermeiden.
+function syncSignature(entries: Entry[]) {
+  return entries.map((entry) => `${entry.id}@${entry.updatedAt}`).sort().join("|");
+}
+
+// Web Share Target (siehe manifest + sw.js): der Service Worker legt geteilten
+// Text in einem eigenen Cache ab; die App holt ihn einmalig ab und löscht ihn.
+async function takeSharedText() {
+  if (!("caches" in window)) return "";
+  try {
+    const cache = await caches.open("voice-inbox-share");
+    const key = `${import.meta.env.BASE_URL}__shared`;
+    const response = await cache.match(key);
+    if (!response) return "";
+    await cache.delete(key);
+    return (await response.text()).trim();
+  } catch { return ""; }
 }
 
 export default function Home() {
@@ -53,6 +61,10 @@ export default function Home() {
   const [draft, setDraft] = useState("");
   const [listening, setListening] = useState(false);
   const [filter, setFilter] = useState<"Alle" | Kind>("Alle");
+  const [status, setStatus] = useState<Status>("Offen");
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
+  const [dueEditId, setDueEditId] = useState<string | null>(null);
+  const [now, setNow] = useState(() => new Date());
   const [query, setQuery] = useState("");
   const [view, setView] = useState<View>("cards");
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -77,18 +89,48 @@ export default function Home() {
   const sessionStartRef = useRef("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const entriesRef = useRef<Entry[]>([]);
+  const syncConfigRef = useRef<SyncConfig>({ url: "", token: "" });
+  const syncingRef = useRef(false);
+  const lastSyncedRef = useRef("");
 
   useEffect(() => {
     const loadTimer = window.setTimeout(() => {
       const storedLang = localStorage.getItem("voice-inbox-lang") as SpeechLang | null;
       if (storedLang && SPEECH_LANGS.some((l) => l.value === storedLang)) { setSpeechLang(storedLang); speechLangRef.current = storedLang; }
-      try { setSyncConfig(JSON.parse(localStorage.getItem("voice-inbox-sync") ?? '{"url":"","token":""}')); } catch { /* lokale Fehlkonfiguration ignorieren */ }
-      setEntries(readStoredEntries()); setLoaded(true);
+      try { const config = JSON.parse(localStorage.getItem("voice-inbox-sync") ?? '{"url":"","token":""}') as SyncConfig; setSyncConfig(config); syncConfigRef.current = config; } catch { /* lokale Fehlkonfiguration ignorieren */ }
+      const stored = readStoredEntries(); entriesRef.current = stored;
+      setEntries(stored); setLoaded(true);
+      void takeSharedText().then((shared) => { if (shared) { draftRef.current = shared; setDraft(shared); } });
+      void synchronize(syncConfigRef.current, true);
     }, 0);
+    const clock = window.setInterval(() => setNow(new Date()), 60_000);
     if ("serviceWorker" in navigator) navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`);
-    return () => { window.clearTimeout(loadTimer); wantsToListenRef.current = false; recognitionRef.current?.stop(); cmdRecognitionRef.current?.stop(); };
+    return () => { window.clearTimeout(loadTimer); window.clearInterval(clock); wantsToListenRef.current = false; recognitionRef.current?.stop(); cmdRecognitionRef.current?.stop(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  useEffect(() => { entriesRef.current = entries; if (loaded) localStorage.setItem("voice-inbox-entries", JSON.stringify(entries)); }, [entries, loaded]);
+  useEffect(() => { entriesRef.current = entries; if (loaded) localStorage.setItem(STORAGE_KEY, JSON.stringify(entries)); }, [entries, loaded]);
+
+  // Auto-Sync: kurz nach jeder Änderung, beim Wiederverbinden und beim
+  // Zurückkehren in die App. Ohne Konfiguration passiert nichts.
+  useEffect(() => {
+    if (!loaded || !syncConfig.url || !syncConfig.token || syncSignature(entries) === lastSyncedRef.current) return;
+    const timer = window.setTimeout(() => void synchronize(syncConfigRef.current, true), 1500);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries, loaded, syncConfig]);
+  useEffect(() => {
+    const onWake = () => { if (document.visibilityState === "visible") void synchronize(syncConfigRef.current, true); };
+    window.addEventListener("online", onWake); document.addEventListener("visibilitychange", onWake);
+    return () => { window.removeEventListener("online", onWake); document.removeEventListener("visibilitychange", onWake); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!syncOpen) return;
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setSyncOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [syncOpen]);
 
   // Needle-2-Modell im Hintergrund vorladen (einmalig, ~14 MB) und die Tools
   // gleich binden, damit der erste Befehl sofort inferieren kann. Bei
@@ -106,27 +148,38 @@ export default function Home() {
   }, []);
 
   const activeEntries = useMemo(() => entries.filter((entry) => !entry.deletedAt), [entries]);
-  const visible = useMemo(() => activeEntries.filter((entry) => (filter === "Alle" || entry.kind === filter) && entry.text.toLowerCase().includes(query.toLowerCase())), [activeEntries, filter, query]);
+  const doneCount = useMemo(() => activeEntries.filter((entry) => entry.done).length, [activeEntries]);
+  const visible = useMemo(() => sortForDisplay(activeEntries.filter((entry) => (filter === "Alle" || entry.kind === filter) && (status === "Gesamt" || (status === "Erledigt") === !!entry.done) && entry.text.toLowerCase().includes(query.toLowerCase()))), [activeEntries, filter, status, query]);
 
-  async function synchronize(config = syncConfig) {
-    if (!config.url || !config.token) { setSyncOpen(true); return; }
-    setSyncState("syncing");
+  // Pull → Merge → Push. Änderungen, die während des Syncs entstehen, werden
+  // in den aktuellen State gemerged statt überschrieben und lösen danach den
+  // nächsten Auto-Sync aus.
+  async function synchronize(config = syncConfigRef.current, silent = false) {
+    if (!config.url || !config.token) { if (!silent) setSyncOpen(true); return; }
+    if (syncingRef.current) return;
+    if (silent && !navigator.onLine) { setSyncState("error"); return; }
+    syncingRef.current = true; setSyncState("syncing");
     try {
       const endpoint = `${config.url.replace(/\/$/, "")}/v1/entries`;
       const headers = { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" };
       const response = await fetch(endpoint, { headers });
-      if (!response.ok) throw new Error("Abruf fehlgeschlagen");
-      const remote = await response.json() as { entries: Entry[] };
-      const merged = mergeEntries(entriesRef.current, remote.entries ?? []);
+      if (!response.ok) throw new Error(response.status === 401 ? "Token ungültig" : "Abruf fehlgeschlagen");
+      const remote = normalizeEntries(await response.json());
+      const merged = mergeEntries(entriesRef.current, remote);
       const saved = await fetch(endpoint, { method: "PUT", headers, body: JSON.stringify({ entries: merged }) });
       if (!saved.ok) throw new Error("Speichern fehlgeschlagen");
-      setEntries(merged); setSyncState("synced"); flash("Mit VPS synchronisiert");
-    } catch { setSyncState("error"); flash("VPS-Synchronisierung fehlgeschlagen"); }
+      const next = mergeEntries(entriesRef.current, merged);
+      lastSyncedRef.current = syncSignature(merged);
+      entriesRef.current = next; setEntries(next);
+      setSyncState("synced"); if (!silent) flash("Mit VPS synchronisiert");
+    } catch (error) {
+      setSyncState("error"); if (!silent) flash(`VPS-Synchronisierung fehlgeschlagen${error instanceof Error && error.message !== "Failed to fetch" ? `: ${error.message}` : ""}`);
+    } finally { syncingRef.current = false; }
   }
 
   function saveSyncConfig() {
     const config = { ...syncConfig, url: syncConfig.url.trim().replace(/\/$/, "") };
-    setSyncConfig(config); localStorage.setItem("voice-inbox-sync", JSON.stringify(config));
+    setSyncConfig(config); syncConfigRef.current = config; localStorage.setItem("voice-inbox-sync", JSON.stringify(config));
     setSyncOpen(false); void synchronize(config);
   }
 
@@ -162,12 +215,32 @@ export default function Home() {
     const text = draft.trim(); if (!text) return;
     wantsToListenRef.current = false; recognitionRef.current?.stop();
     // Eingabe nach dem Ablegen leeren, damit sofort ein neuer Eintrag begonnen werden kann.
-    setEntries((current) => [{ id: crypto.randomUUID(), kind: classify(text), text, created: "Gerade eben", updatedAt: new Date().toISOString() }, ...current]);
+    const entry = createEntry(text);
+    setEntries((current) => [entry, ...current]);
+    if (status === "Erledigt") setStatus("Offen");
     draftRef.current = ""; setDraft("");
   }
   function deleteEntry(id: string) {
     const stamp = new Date().toISOString();
     setEntries((current) => current.map((item) => item.id === id ? { ...item, deletedAt: stamp, updatedAt: stamp } : item));
+  }
+  function updateEntry(id: string, patch: Partial<Entry>) {
+    setEntries((current) => current.map((item) => item.id === id ? { ...item, ...patch, updatedAt: new Date().toISOString() } : item));
+  }
+  function toggleDone(entry: Entry) {
+    updateEntry(entry.id, { done: !entry.done });
+    if (!entry.done) flash("Erledigt ✓");
+  }
+  function saveEdit() {
+    if (!editing) return;
+    const text = editing.text.trim();
+    const original = entriesRef.current.find((item) => item.id === editing.id);
+    if (text && original && text !== original.text) updateEntry(editing.id, { text, dueAt: original.dueAt ?? parseDue(text) });
+    setEditing(null);
+  }
+  function changeDue(id: string, dueAt: string | undefined) {
+    updateEntry(id, { dueAt });
+    setDueEditId(null);
   }
   // Tag manuell umschalten: zyklisch durch die Kinds.
   function cycleKind(id: string) {
@@ -184,26 +257,30 @@ export default function Home() {
     setNotice(message);
     window.setTimeout(() => setNotice((current) => (current === message ? "" : current)), 2500);
   }
-  function exportJson() {
-    const blob = new Blob([JSON.stringify(activeEntries, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
+  function download(content: string, type: string, filename: string) {
+    const url = URL.createObjectURL(new Blob([content], { type }));
     const link = document.createElement("a");
-    link.href = url; link.download = "voice-inbox-export.json"; link.click();
+    link.href = url; link.download = filename; link.click();
     URL.revokeObjectURL(url);
+  }
+  function exportMarkdown() {
+    download(toMarkdown(activeEntries), "text/markdown", "voice-inbox.md");
+    flash(`${activeEntries.length} Einträge als Markdown exportiert`);
+  }
+  function exportJson() {
+    download(JSON.stringify(activeEntries, null, 2), "application/json", "voice-inbox-export.json");
     flash(`${activeEntries.length} Einträge exportiert`);
   }
   function importJson(file: File) {
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const parsed = JSON.parse(String(reader.result)) as Entry[];
-        if (!Array.isArray(parsed)) throw new Error("kein Array");
-        const importedAt = new Date().toISOString();
-        const cleaned = parsed
-          .filter((item) => item && typeof item.text === "string")
-          .map((item) => ({ id: item.id ?? crypto.randomUUID(), kind: KINDS.includes(item.kind) ? item.kind : classify(item.text), text: item.text, created: item.created ?? "Importiert", updatedAt: item.updatedAt ?? importedAt }));
-        setEntries(cleaned);
-        flash(`${cleaned.length} Einträge importiert`);
+        const parsed = JSON.parse(String(reader.result)) as unknown;
+        if (!Array.isArray(parsed) && !(parsed && typeof parsed === "object" && Array.isArray((parsed as { entries?: unknown }).entries))) throw new Error("kein Array");
+        // Import ergänzt den Bestand (Merge über id + updatedAt) statt ihn zu ersetzen.
+        const imported = normalizeEntries(parsed);
+        setEntries((current) => mergeEntries(current, imported));
+        flash(`${imported.length} Einträge importiert`);
       } catch { flash("Import fehlgeschlagen: ungültige JSON-Datei"); }
     };
     reader.readAsText(file);
@@ -215,7 +292,7 @@ export default function Home() {
     setView,
     setFilter,
     setQuery,
-    addEntry: (text) => setEntries((current) => [{ id: crypto.randomUUID(), kind: classify(text), text, created: "Gerade eben", updatedAt: new Date().toISOString() }, ...current]),
+    addEntry: (text) => setEntries((current) => [createEntry(text), ...current]),
     deleteMatching: (match) => {
       const needle = match.toLowerCase();
       const count = entriesRef.current.filter((entry) => !entry.deletedAt && entry.text.toLowerCase().includes(needle)).length;
@@ -223,8 +300,7 @@ export default function Home() {
       return count;
     },
     deleteLatest: (kind) => {
-      // Neuester Eintrag steht vorn (wird beim Anlegen vorangestellt).
-      const target = (kind && entriesRef.current.find((entry) => !entry.deletedAt && entry.kind === kind)) ?? entriesRef.current.find((entry) => !entry.deletedAt);
+      const target = latestEntry(entriesRef.current, kind);
       if (!target) return null;
       const stamp = new Date().toISOString(); setEntries((current) => current.map((entry) => entry.id === target.id ? { ...entry, deletedAt: stamp, updatedAt: stamp } : entry));
       return { text: target.text, kind: target.kind };
@@ -234,6 +310,18 @@ export default function Home() {
       const count = entriesRef.current.filter((entry) => !entry.deletedAt && entry.text.toLowerCase().includes(needle)).length;
       if (count) setEntries((current) => current.map((entry) => (!entry.deletedAt && entry.text.toLowerCase().includes(needle) ? { ...entry, kind, updatedAt: new Date().toISOString() } : entry)));
       return count;
+    },
+    completeMatching: (match) => {
+      const needle = match.toLowerCase();
+      const hits = entriesRef.current.filter((entry) => !entry.deletedAt && !entry.done && entry.text.toLowerCase().includes(needle));
+      hits.forEach((entry) => updateEntry(entry.id, { done: true }));
+      return hits.length;
+    },
+    completeLatest: (kind) => {
+      const target = latestEntry(entriesRef.current.filter((entry) => !entry.done), kind);
+      if (!target) return null;
+      updateEntry(target.id, { done: true });
+      return { text: target.text, kind: target.kind };
     },
     exportJson,
   };
@@ -329,6 +417,41 @@ export default function Home() {
     wantsToListenRef.current = false; recognitionRef.current?.stop(); cmdRecognitionRef.current?.stop();
   }
 
+  const emptyLabel = activeEntries.length === 0 ? "Noch keine Einträge." : status === "Erledigt" ? "Noch nichts erledigt." : status === "Offen" && !query && filter === "Alle" ? "Alles erledigt. 🎉" : "Keine passenden Einträge.";
+
+  function entryBody(entry: Entry, className: string) {
+    if (editing?.id === entry.id) {
+      return <div className="editBox">
+        <textarea value={editing.text} onChange={(event) => setEditing({ id: entry.id, text: event.target.value })} onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) saveEdit(); if (event.key === "Escape") setEditing(null); }} aria-label="Eintrag bearbeiten" />
+        <div><button onClick={saveEdit}>Speichern</button><button className="secondary" onClick={() => setEditing(null)}>Abbrechen</button></div>
+      </div>;
+    }
+    return <p className={className}>{entry.text}</p>;
+  }
+  function entryActions(entry: Entry) {
+    return <>
+      <button className="ghost" onClick={() => setEditing({ id: entry.id, text: entry.text })} aria-label="Bearbeiten" title="Bearbeiten">✎</button>
+      <button className="ghost" onClick={() => setDueEditId(dueEditId === entry.id ? null : entry.id)} aria-label="Fälligkeit setzen" title="Fälligkeit setzen">◷</button>
+      <button className="ghost" onClick={() => copyEntry(entry)} aria-label="Kopieren" title="Kopieren">{copiedId === entry.id ? "✓" : "⧉"}</button>
+      <button className="ghost" onClick={() => deleteEntry(entry.id)} aria-label="Löschen" title="Löschen">×</button>
+    </>;
+  }
+  function dueChip(entry: Entry) {
+    if (!entry.dueAt) return null;
+    const state = entry.done ? "done" : dueState(entry.dueAt, now);
+    return <button className={`due ${state}`} onClick={() => setDueEditId(dueEditId === entry.id ? null : entry.id)} aria-label={`Fällig ${formatDue(entry.dueAt, now)}, ändern`} title="Fälligkeit ändern">◷ {formatDue(entry.dueAt, now)}</button>;
+  }
+  function dueEditor(entry: Entry) {
+    if (dueEditId !== entry.id) return null;
+    return <div className="dueEditor">
+      <input type="datetime-local" value={dueToInput(entry.dueAt)} onChange={(event) => updateEntry(entry.id, { dueAt: inputToDue(event.target.value) })} aria-label="Fällig am" />
+      <button onClick={() => changeDue(entry.id, snoozeDue(entry.dueAt, 1, now))}>+1 Tag</button>
+      <button onClick={() => changeDue(entry.id, snoozeDue(entry.dueAt, 7, now))}>+1 Woche</button>
+      {entry.dueAt && <button className="secondary" onClick={() => changeDue(entry.id, undefined)}>Entfernen</button>}
+      <button className="secondary" onClick={() => setDueEditId(null)} aria-label="Fälligkeit schließen">Fertig</button>
+    </div>;
+  }
+
   return <main>
     <header className="topbar"><a className="brand" href="./"><span className="logo">V</span><span>Voice Inbox</span></a><div className="topbarRight"><button className={`syncButton ${syncState}`} onClick={() => syncConfig.url ? void synchronize() : setSyncOpen(true)}><span />{syncState === "syncing" ? "Sync …" : syncState === "synced" ? "VPS aktuell" : syncState === "error" ? "Sync-Fehler" : syncConfig.url ? "VPS Sync" : "Sync einrichten"}</button><select className="langSelect" value={speechLang} onChange={(event) => changeSpeechLang(event.target.value as SpeechLang)} aria-label="Sprache der Spracherkennung" title="Sprache der Spracherkennung">{SPEECH_LANGS.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}</select><a className="inboxLink" href="#inbox">Inbox <b>{activeEntries.length}</b></a></div></header>
     <section className="hero">
@@ -372,37 +495,44 @@ export default function Home() {
       </details>
       <div className="toolbar">
         <div className="filters">{(["Alle", "Aufgabe", "Termin", "Notiz", "Idee"] as const).map((item) => <button className={filter === item ? "active" : ""} onClick={() => setFilter(item)} key={item}>{item}{item === "Alle" && <span>{activeEntries.length}</span>}</button>)}</div>
+        <div className="viewToggle" role="group" aria-label="Status filtern">
+          {(["Offen", "Erledigt", "Gesamt"] as const).map((item) => <button key={item} className={status === item ? "active" : ""} onClick={() => setStatus(item)} aria-pressed={status === item}>{item}{item === "Erledigt" && doneCount > 0 && <span className="count">{doneCount}</span>}</button>)}
+        </div>
         <div className="viewToggle" role="group" aria-label="Ansicht umschalten">
           <button className={view === "cards" ? "active" : ""} onClick={() => setView("cards")} aria-pressed={view === "cards"} aria-label="Kartenansicht">▦ Karten</button>
           <button className={view === "list" ? "active" : ""} onClick={() => setView("list")} aria-pressed={view === "list"} aria-label="Listenansicht">☰ Liste</button>
         </div>
       </div>
       {view === "cards"
-        ? <div className="grid">{visible.map((entry) => <article key={entry.id} className="card">
+        ? <div className="grid">{visible.map((entry) => <article key={entry.id} className={`card ${entry.done ? "isDone" : ""}`}>
             <div className="cardTop">
-              <button className={`tag ${colors[entry.kind]}`} onClick={() => cycleKind(entry.id)} title="Kategorie ändern" aria-label={`Kategorie ${entry.kind}, klicken zum Ändern`}>{entry.kind}</button>
-              <div className="cardActions">
-                <button className="ghost" onClick={() => copyEntry(entry)} aria-label="Kopieren">{copiedId === entry.id ? "✓" : "⧉"}</button>
-                <button className="ghost" onClick={() => deleteEntry(entry.id)} aria-label="Löschen">×</button>
+              <div className="cardTags">
+                <button className={`check ${entry.done ? "on" : ""}`} onClick={() => toggleDone(entry)} aria-label={entry.done ? "Wieder öffnen" : "Als erledigt markieren"} aria-pressed={!!entry.done}>{entry.done ? "✓" : ""}</button>
+                <button className={`tag ${colors[entry.kind]}`} onClick={() => cycleKind(entry.id)} title="Kategorie ändern" aria-label={`Kategorie ${entry.kind}, klicken zum Ändern`}>{entry.kind}</button>
               </div>
+              <div className="cardActions">{entryActions(entry)}</div>
             </div>
-            <p className="entryText">{entry.text}</p>
-            <footer><span>{entry.created}</span></footer>
-          </article>)}{visible.length === 0 && <div className="empty">Noch keine Einträge.</div>}</div>
-        : <div className="list">{visible.map((entry) => <div key={entry.id} className="row">
+            {entryBody(entry, "entryText")}
+            <footer><span>{formatCreated(entry, now)}</span>{dueChip(entry)}</footer>
+            {dueEditor(entry)}
+          </article>)}{visible.length === 0 && <div className="empty">{emptyLabel}</div>}</div>
+        : <div className="list">{visible.map((entry) => <div key={entry.id} className={`row ${entry.done ? "isDone" : ""}`}>
+            <button className={`check ${entry.done ? "on" : ""}`} onClick={() => toggleDone(entry)} aria-label={entry.done ? "Wieder öffnen" : "Als erledigt markieren"} aria-pressed={!!entry.done}>{entry.done ? "✓" : ""}</button>
             <button className={`tag ${colors[entry.kind]}`} onClick={() => cycleKind(entry.id)} title="Kategorie ändern" aria-label={`Kategorie ${entry.kind}, klicken zum Ändern`}>{entry.kind}</button>
-            <span className="rowText">{entry.text}</span>
-            <span className="rowMeta">{entry.created}</span>
-            <button className="ghost" onClick={() => copyEntry(entry)} aria-label="Kopieren">{copiedId === entry.id ? "✓" : "⧉"}</button>
-            <button className="ghost" onClick={() => deleteEntry(entry.id)} aria-label="Löschen">×</button>
-          </div>)}{visible.length === 0 && <div className="empty">Noch keine Einträge.</div>}</div>}
+            {entryBody(entry, "rowText")}
+            {dueChip(entry)}
+            <span className="rowMeta">{formatCreated(entry, now)}</span>
+            {entryActions(entry)}
+            {dueEditor(entry)}
+          </div>)}{visible.length === 0 && <div className="empty">{emptyLabel}</div>}</div>}
       <div className="dataBar">
         <button onClick={exportJson} disabled={activeEntries.length === 0}>Export als JSON</button>
+        <button onClick={exportMarkdown} disabled={activeEntries.length === 0}>Export als Markdown</button>
         <button onClick={() => fileInputRef.current?.click()}>Import aus JSON</button>
         <input ref={fileInputRef} type="file" accept="application/json,.json" hidden aria-label="JSON-Datei importieren" onChange={(event) => { const file = event.target.files?.[0]; if (file) importJson(file); event.target.value = ""; }} />
         {notice && <span className="notice" role="status">{notice}</span>}
       </div>
     </section>
-    {syncOpen && <div className="modalBackdrop" onClick={() => setSyncOpen(false)}><form className="syncModal" autoComplete="on" onClick={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); saveSyncConfig(); }}><button type="button" className="modalClose" onClick={() => setSyncOpen(false)} aria-label="Schließen">×</button><span className="tag green">Eigener Server</span><h2>VPS-Synchronisierung</h2><p>URL und Token werden nur lokal in diesem Browser gespeichert. Die Einträge gehen ausschließlich an deinen VPS.</p><label htmlFor="sync-server">API-Adresse<input id="sync-server" name="username" type="text" inputMode="url" autoComplete="username" autoCapitalize="none" spellCheck={false} placeholder="https://strato-vpc.…ts.net:8443" value={syncConfig.url} onChange={(event) => setSyncConfig({ ...syncConfig, url: event.target.value })}/></label><label htmlFor="sync-token">Zugangs-Token<input id="sync-token" name="password" type="password" autoComplete="current-password" placeholder="Token vom VPS" value={syncConfig.token} onChange={(event) => setSyncConfig({ ...syncConfig, token: event.target.value })}/></label><button type="submit" className="saveSync">Speichern & synchronisieren</button></form></div>}
+    {syncOpen && <div className="modalBackdrop"><button type="button" className="modalScrim" tabIndex={-1} aria-label="Dialog schließen" onClick={() => setSyncOpen(false)} /><form className="syncModal" autoComplete="on" onSubmit={(event) => { event.preventDefault(); saveSyncConfig(); }}><button type="button" className="modalClose" onClick={() => setSyncOpen(false)} aria-label="Schließen">×</button><span className="tag green">Eigener Server</span><h2>VPS-Synchronisierung</h2><p>URL und Token werden nur lokal in diesem Browser gespeichert. Die Einträge gehen ausschließlich an deinen VPS.</p><label htmlFor="sync-server">API-Adresse<input id="sync-server" name="username" type="text" inputMode="url" autoComplete="username" autoCapitalize="none" spellCheck={false} placeholder="https://strato-vpc.…ts.net:8443" value={syncConfig.url} onChange={(event) => setSyncConfig({ ...syncConfig, url: event.target.value })}/></label><label htmlFor="sync-token">Zugangs-Token<input id="sync-token" name="password" type="password" autoComplete="current-password" placeholder="Token vom VPS" value={syncConfig.token} onChange={(event) => setSyncConfig({ ...syncConfig, token: event.target.value })}/></label><button type="submit" className="saveSync">Speichern & synchronisieren</button></form></div>}
   </main>;
 }
