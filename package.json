@@ -11,10 +11,12 @@
     "build:pages": "pnpm build",
     "build:worker": "vinext build",
     "start": "vinext start",
-    "test": "pnpm build && node --test tests/rendered-html.test.mjs",
+    "test": "pnpm build && node --test --experimental-strip-types tests/rendered-html.test.mjs tests/model.test.ts",
+    "test:server": "python3 -m unittest server/test_server.py",
     "test:e2e": "playwright test",
     "test:e2e:shots": "playwright test screenshots.spec.ts",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern dist-pages --ignore-pattern .next --ignore-pattern app/agent/vendor"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern dist-pages --ignore-pattern .next --ignore-pattern app/agent/vendor",
+    "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
     "react": "19.2.6",

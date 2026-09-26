@@ -1,4 +1,4 @@
-const CACHE = "voice-inbox-v3";
+const CACHE = "voice-inbox-v4";
 const ROOT = new URL("./", self.location.href).pathname;
 
 self.addEventListener("install", (event) => {
@@ -38,6 +38,6 @@ self.addEventListener("fetch", (event) => {
         }
         return response;
       })
-      .catch(async () => (await caches.match(event.request)) ?? Response.error()),
+      .catch(async () => (await caches.match(event.request)) ?? (event.request.mode === "navigate" ? await caches.match(event.request, { ignoreSearch: true }) : undefined) ?? Response.error()),
   );
 });

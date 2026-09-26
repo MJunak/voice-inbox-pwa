@@ -15,6 +15,7 @@ passend zum Rest der App.
 | „nur Termine“ / „filter Ideen“ | Kategorie-Filter | Fast-Path (sofort) |
 | „such nach Anna“ | Suche setzen | Fast-Path (sofort) |
 | „Lösch die letzte Notiz“ | neuesten Eintrag löschen (kategorie-bewusst) | Fast-Path (sofort) |
+| „erledige Rechnung“ / „hake Milch ab“ / „mark report as done“ | passende offene Einträge abhaken | Fast-Path (sofort) |
 | „export“ | JSON-Export | Fast-Path (sofort) |
 | „leg eine Notiz an: Milch kaufen“ | Eintrag anlegen | Modell (~0,3–1,5 s) |
 | „lösche den Zahnarzt-Termin“ | Einträge per Texttreffer löschen | Modell |
@@ -57,7 +58,7 @@ Command-Bar (page.tsx)
   └─ runToolCalls()         app/agent/actions.ts   ToolCall -> App-Aktion
 ```
 
-- **Tools** (`TOOLS` in `actions.ts`): 8 Aktionen im Needle-Format
+- **Tools** (`TOOLS` in `actions.ts`): 9 Aktionen im Needle-Format
   (`{name, description, parameters}`), Beschreibungen knapp und englisch.
   Sie werden beim Init **einmal** gebunden (KV-Sinks) — die Listenlänge kostet
   danach pro Anfrage nichts.
