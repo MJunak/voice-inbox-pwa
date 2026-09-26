@@ -226,10 +226,23 @@ test("exportiert als Markdown", async ({ page }) => {
   expect(content).toContain("- [ ] Ich muss die Steuer machen");
 });
 
-test("übernimmt geteilten Text (Share Target) in den Composer", async ({ page }) => {
-  await page.goto("/?title=Artikel&text=Unbedingt%20lesen&url=https%3A%2F%2Fexample.com");
+test("übernimmt geteilten Text (Share Target per POST) in den Composer", async ({ page }) => {
+  await page.goto("/");
+  // Warten, bis der Service Worker die Seite kontrolliert.
+  await page.waitForFunction(() => !!navigator.serviceWorker?.controller, null, { timeout: 15_000 }).catch(async () => { await page.reload(); await page.waitForFunction(() => !!navigator.serviceWorker?.controller); });
+  const finalUrl = await page.evaluate(async () => {
+    const form = new FormData();
+    form.set("title", "Artikel"); form.set("text", "Unbedingt lesen"); form.set("url", "https://example.com");
+    const response = await fetch("share-target", { method: "POST", body: form });
+    return response.url;
+  });
+  // Der geteilte Inhalt steht nie in der URL.
+  expect(new URL(finalUrl).search).toBe("");
+  await page.reload();
   await expect(page.getByRole("textbox", { name: /neuen Inbox-Eintrag/i })).toHaveValue("Artikel\nUnbedingt lesen\nhttps://example.com");
-  expect(new URL(page.url()).search).toBe("");
+  // Einmalig: nach erneutem Laden ist der Composer wieder leer.
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: /neuen Inbox-Eintrag/i })).toHaveValue("");
 });
 
 test("migriert alte Einträge ohne Zeitstempel und legt ein Backup an", async ({ page }) => {

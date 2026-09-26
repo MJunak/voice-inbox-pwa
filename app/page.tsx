@@ -41,12 +41,18 @@ function syncSignature(entries: Entry[]) {
   return entries.map((entry) => `${entry.id}@${entry.updatedAt}`).sort().join("|");
 }
 
-// Web Share Target (siehe manifest): geteilter Text/Link landet im Composer.
-function readSharedText() {
-  const params = new URLSearchParams(window.location.search);
-  const shared = [params.get("title"), params.get("text"), params.get("url")].filter((part, index, all) => part && all.indexOf(part) === index).join("\n");
-  if (params.has("title") || params.has("text") || params.has("url")) window.history.replaceState(null, "", window.location.pathname + window.location.hash);
-  return shared;
+// Web Share Target (siehe manifest + sw.js): der Service Worker legt geteilten
+// Text in einem eigenen Cache ab; die App holt ihn einmalig ab und löscht ihn.
+async function takeSharedText() {
+  if (!("caches" in window)) return "";
+  try {
+    const cache = await caches.open("voice-inbox-share");
+    const key = `${import.meta.env.BASE_URL}__shared`;
+    const response = await cache.match(key);
+    if (!response) return "";
+    await cache.delete(key);
+    return (await response.text()).trim();
+  } catch { return ""; }
 }
 
 export default function Home() {
@@ -94,8 +100,7 @@ export default function Home() {
       try { const config = JSON.parse(localStorage.getItem("voice-inbox-sync") ?? '{"url":"","token":""}') as SyncConfig; setSyncConfig(config); syncConfigRef.current = config; } catch { /* lokale Fehlkonfiguration ignorieren */ }
       const stored = readStoredEntries(); entriesRef.current = stored;
       setEntries(stored); setLoaded(true);
-      const shared = readSharedText();
-      if (shared) { draftRef.current = shared; setDraft(shared); }
+      void takeSharedText().then((shared) => { if (shared) { draftRef.current = shared; setDraft(shared); } });
       void synchronize(syncConfigRef.current, true);
     }, 0);
     const clock = window.setInterval(() => setNow(new Date()), 60_000);
