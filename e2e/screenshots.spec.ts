@@ -1,4 +1,4 @@
-import { test } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { installSpeechMock, installNeedleMock, seedEntries } from "./helpers";
 
 // Diese Datei erzeugt keine Assertions, sondern gut benannte Screenshots unter
@@ -12,6 +12,13 @@ const sampleEntries = [
   { id: "4", kind: "Notiz", text: "Passwort-Manager Lizenz läuft im März aus", created: "Gestern" },
 ];
 
+// Erst aufnehmen, wenn die Seite zur Ruhe gekommen ist (Dev-Server kann beim
+// ersten Aufruf noch nachladen); Animationen für stabile Bilder anhalten.
+async function shot(page: Page, path: string) {
+  await page.waitForLoadState("networkidle");
+  await page.screenshot({ path, fullPage: true, animations: "disabled" });
+}
+
 test.beforeEach(async ({ page }) => {
   await installSpeechMock(page);
   await installNeedleMock(page, []);
@@ -21,14 +28,14 @@ test("screenshot: leerer Zustand", async ({ page }) => {
   await page.addInitScript(() => localStorage.clear());
   await page.goto("/");
   await page.getByRole("heading", { name: "Inbox", exact: true }).waitFor();
-  await page.screenshot({ path: "e2e/screens/01-empty.png", fullPage: true });
+  await shot(page, "e2e/screens/01-empty.png");
 });
 
 test("screenshot: mit Einträgen", async ({ page }) => {
   await seedEntries(page, sampleEntries);
   await page.goto("/");
   await page.locator(".card").first().waitFor();
-  await page.screenshot({ path: "e2e/screens/02-entries.png", fullPage: true });
+  await shot(page, "e2e/screens/02-entries.png");
 });
 
 test("screenshot: Listenansicht", async ({ page }) => {
@@ -36,7 +43,7 @@ test("screenshot: Listenansicht", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: /Listenansicht/i }).click();
   await page.locator(".row").first().waitFor();
-  await page.screenshot({ path: "e2e/screens/04-list.png", fullPage: true });
+  await shot(page, "e2e/screens/04-list.png");
 });
 
 test("screenshot: Debug-Panel nach Befehl", async ({ page }) => {
@@ -49,7 +56,7 @@ test("screenshot: Debug-Panel nach Befehl", async ({ page }) => {
   await page.getByRole("button", { name: "Ausführen" }).click();
   await page.locator(".row").first().waitFor();
   await page.getByText("Debug: Inferenz").click();
-  await page.screenshot({ path: "e2e/screens/05-debug.png", fullPage: true });
+  await shot(page, "e2e/screens/05-debug.png");
 });
 
 test("screenshot: Aktions-Vorschau (Modellpfad)", async ({ page }) => {
@@ -61,14 +68,14 @@ test("screenshot: Aktions-Vorschau (Modellpfad)", async ({ page }) => {
   await page.getByRole("textbox", { name: /Befehl an die App/i }).fill("räum den zahnarzt eintrag weg");
   await page.getByRole("button", { name: "Ausführen" }).click();
   await page.getByRole("dialog", { name: /Vorschau der Aktion/i }).waitFor();
-  await page.screenshot({ path: "e2e/screens/06-preview.png", fullPage: true });
+  await shot(page, "e2e/screens/06-preview.png");
 });
 
 test("screenshot: Composer mit Text", async ({ page }) => {
   await page.addInitScript(() => localStorage.clear());
   await page.goto("/");
-  await page
-    .getByRole("textbox", { name: /neuen Inbox-Eintrag/i })
-    .fill("Beispieltext im Composer, den man vor dem Ablegen noch bearbeiten kann.");
-  await page.screenshot({ path: "e2e/screens/03-composer.png", fullPage: true });
+  const composer = page.getByRole("textbox", { name: /neuen Inbox-Eintrag/i });
+  await composer.fill("Beispieltext im Composer, den man vor dem Ablegen noch bearbeiten kann.");
+  await expect(composer).toHaveValue(/Beispieltext/);
+  await shot(page, "e2e/screens/03-composer.png");
 });
