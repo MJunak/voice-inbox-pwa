@@ -1,7 +1,7 @@
 import json, os, sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
-DB_PATH=os.getenv("DB_PATH","/data/voice-inbox.db"); API_TOKEN=os.getenv("API_TOKEN",""); ALLOWED_ORIGIN=os.getenv("ALLOWED_ORIGIN","*")
+DB_PATH=os.getenv("DB_PATH","/data/voice-inbox.db"); API_TOKEN=os.getenv("API_TOKEN",""); ALLOWED_ORIGIN=os.getenv("ALLOWED_ORIGIN","*"); PORT=int(os.getenv("PORT","8080"))
 def db():
  c=sqlite3.connect(DB_PATH); c.execute("CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)"); return c
 class Handler(BaseHTTPRequestHandler):
@@ -19,10 +19,10 @@ class Handler(BaseHTTPRequestHandler):
   if urlparse(self.path).path!="/v1/entries": self.reply(404); return
   if not self.auth(): self.reply(401); return
   try:
-   size=int(self.headers.get("Content-Length","0")); assert size<=5_000_000; entries=json.loads(self.rfile.read(size)).get("entries",[])
+   size=int(self.headers.get("Content-Length","0")); assert size<=5_000_000; body=json.loads(self.rfile.read(size)); assert isinstance(body,dict); entries=body.get("entries",[]); assert isinstance(entries,list)
    with db() as c:
     for e in entries:
-     if not e.get("id") or not e.get("updatedAt"): continue
+     if not isinstance(e,dict) or not isinstance(e.get("id"),str) or not e["id"] or not isinstance(e.get("updatedAt"),str): continue
      old=c.execute("SELECT updated_at FROM entries WHERE id=?",(e["id"],)).fetchone()
      if not old or e["updatedAt"]>old[0]: c.execute("INSERT OR REPLACE INTO entries VALUES (?,?,?)",(e["id"],json.dumps(e,ensure_ascii=False),e["updatedAt"]))
    self.reply(); self.wfile.write(b'{"ok":true}')
@@ -30,4 +30,4 @@ class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args): pass
 if __name__=="__main__":
  if not API_TOKEN: raise SystemExit("API_TOKEN must be set")
- os.makedirs(os.path.dirname(DB_PATH),exist_ok=True); ThreadingHTTPServer(("0.0.0.0",8080),Handler).serve_forever()
+ os.makedirs(os.path.dirname(DB_PATH),exist_ok=True); ThreadingHTTPServer(("0.0.0.0",PORT),Handler).serve_forever()

@@ -18,7 +18,9 @@ export default defineConfig({
     screenshot: "only-on-failure",
     viewport: { width: 1280, height: 900 },
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  // PW_CHROMIUM_PATH erlaubt ein vorinstalliertes Chromium (z. B. in CI-/Cloud-
+  // Containern mit abweichender Playwright-Version) statt `playwright install`.
+  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], launchOptions: process.env.PW_CHROMIUM_PATH ? { executablePath: process.env.PW_CHROMIUM_PATH } : {} } }],
   webServer: {
     command: "pnpm dev",
     url: "http://localhost:3000",
